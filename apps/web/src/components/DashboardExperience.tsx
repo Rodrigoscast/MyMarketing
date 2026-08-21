@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -14,15 +14,11 @@ import {
 } from "recharts";
 import {
   Bell,
-  Briefcase,
   CalendarClock,
-  Camera,
   Check,
   FileVideo,
   Gauge,
   Megaphone,
-  MessageCircle,
-  Play,
   Plus,
   Save,
   Search,
@@ -32,35 +28,6 @@ import {
   Video
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
-
-const platformOptions = [
-  { key: "linkedin", label: "LinkedIn", icon: Briefcase },
-  { key: "facebook", label: "Facebook", icon: MessageCircle },
-  { key: "instagram", label: "Instagram", icon: Camera },
-  { key: "tiktok", label: "TikTok", icon: Play },
-  { key: "youtube", label: "YouTube", icon: Video }
-];
-
-const posts = [
-  {
-    title: "Video institucional",
-    status: "Agendado",
-    date: "Hoje, 09:00",
-    platforms: ["LinkedIn", "Instagram", "YouTube"]
-  },
-  {
-    title: "Oferta para leads mornos",
-    status: "Aprovacao",
-    date: "Amanha, 14:30",
-    platforms: ["Facebook", "Instagram"]
-  },
-  {
-    title: "Corte TikTok - case cliente",
-    status: "Rascunho",
-    date: "Sex, 11:15",
-    platforms: ["TikTok", "YouTube"]
-  }
-];
 
 const revenueData = [
   { day: "Seg", receita: 32000, investimento: 8400 },
@@ -80,47 +47,40 @@ const channelData = [
 ];
 
 export function DashboardExperience() {
-  const [selectedPlatforms, setSelectedPlatforms] = useState(["linkedin", "instagram"]);
   const [chartsReady, setChartsReady] = useState(false);
-  const selectedLabels = useMemo(
-    () =>
-      platformOptions
-        .filter((platform) => selectedPlatforms.includes(platform.key))
-        .map((platform) => platform.label)
-        .join(", "),
-    [selectedPlatforms]
-  );
 
   useEffect(() => {
     setChartsReady(true);
   }, []);
-
-  function togglePlatform(key: string) {
-    setSelectedPlatforms((current) =>
-      current.includes(key) ? current.filter((item) => item !== key) : [...current, key]
-    );
-  }
 
   return (
     <main className="app-shell">
       <aside className="sidebar">
         <Logo />
         <nav className="sidebar-nav" aria-label="Sistema">
-          <a className="active" href="#visao">
+          <a href="/app">
             <Gauge size={18} />
-            Visao geral
+            Visão geral
           </a>
-          <a href="#agenda">
+          <a href="/app/videos">
+            <FileVideo size={18} />
+            Vídeos
+          </a>
+          <a href="/app/canais">
+            <Video size={18} />
+            Canais do YouTube
+          </a>
+          <a href="/app/calendario">
             <CalendarClock size={18} />
-            Agenda
+            Calendário
           </a>
-          <a href="#anuncios">
+          <a href="/app/analytics">
             <Megaphone size={18} />
-            Anuncios
+            Analytics
           </a>
-          <a href="#config">
+          <a href="/app/config">
             <Settings size={18} />
-            Configuracoes
+            Configurações
           </a>
         </nav>
       </aside>
@@ -169,87 +129,48 @@ export function DashboardExperience() {
           <article className="panel composer-panel" id="agenda">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Publicacao multicanal</p>
-                <h2>Agendar conteudo</h2>
+                <p className="eyebrow">Publicação YouTube</p>
+                <h2>Criar novo vídeo</h2>
               </div>
-              <button className="secondary-button compact-button">
+              <a href="/app/videos" className="primary-button compact-button">
                 <Plus size={17} />
-                Novo
-              </button>
+                Novo vídeo
+              </a>
             </div>
 
             <div className="upload-zone">
               <FileVideo size={28} />
               <div>
-                <b>Video ou imagem da campanha</b>
-                <span>MP4, MOV, PNG ou JPG</span>
+                <b>Envie seu arquivo de vídeo</b>
+                <span>MP4, MOV, AVI, MKV, WebM — até 2GB</span>
               </div>
-              <button className="icon-button" aria-label="Enviar arquivo">
+              <a href="/app/videos" className="icon-button" aria-label="Criar vídeo">
                 <Upload size={19} />
-              </button>
+              </a>
             </div>
 
-            <label className="field">
-              Texto da publicacao
-              <textarea placeholder="Escreva a legenda principal da campanha..." rows={5} />
-            </label>
-
-            <div className="platform-picker" aria-label="Plataformas">
-              {platformOptions.map((platform) => {
-                const Icon = platform.icon;
-                const active = selectedPlatforms.includes(platform.key);
-                return (
-                  <button
-                    type="button"
-                    key={platform.key}
-                    className={active ? "platform-pill active" : "platform-pill"}
-                    onClick={() => togglePlatform(platform.key)}
-                  >
-                    <Icon size={17} />
-                    {platform.label}
-                    {active && <Check size={15} />}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="schedule-row">
-              <label className="field">
-                Data
-                <input type="date" defaultValue="2026-04-27" />
-              </label>
-              <label className="field">
-                Horario
-                <input type="time" defaultValue="09:00" />
-              </label>
-            </div>
-
-            <button className="primary-button full-button" type="button">
-              Agendar em {selectedLabels || "plataformas"}
-            </button>
+            <p style={{ color: "#6b7280", fontSize: "14px", marginTop: "8px" }}>
+              Gerencie uploads, metadados completos (título, descrição, tags, thumbnail, playlist, agendamento nativo)
+              e acompanhe o engajamento no <a href="/app/analytics" style={{ color: "#0f766e" }}>Analytics</a>.
+            </p>
           </article>
 
           <article className="panel calendar-panel">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Fila editorial</p>
-                <h2>Proximas publicacoes</h2>
+                <p className="eyebrow">Agenda de publicação</p>
+                <h2>Próximos vídeos</h2>
               </div>
               <CalendarClock size={22} />
             </div>
             <div className="post-list">
-              {posts.map((post) => (
-                <div className="post-item" key={post.title}>
-                  <div>
-                    <b>{post.title}</b>
-                    <span>{post.platforms.join(" - ")}</span>
-                  </div>
-                  <div>
-                    <small>{post.date}</small>
-                    <em>{post.status}</em>
-                  </div>
-                </div>
-              ))}
+              <div className="post-item empty">
+                <p>Nenhum vídeo agendado ainda.</p>
+                <a href="/app/videos" className="primary-button compact-button" style={{ marginTop: "8px" }}>
+                  <Plus size={15} />
+                  Criar primeiro vídeo
+                </a>
+              </div>
             </div>
           </article>
         </section>

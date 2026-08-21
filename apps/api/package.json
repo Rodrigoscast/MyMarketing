@@ -14,6 +14,7 @@
     "cors": "latest",
     "dotenv": "latest",
     "express": "latest",
+    "googleapis": "^176.0.0",
     "multer": "latest",
     "zod": "latest"
   },
