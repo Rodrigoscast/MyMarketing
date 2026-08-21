@@ -7,7 +7,8 @@ import { fileURLToPath } from "node:url";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg } from "../auth/middleware.js";
 import { env } from "../../config/index.js";
-import { ValidationError, NotFoundError, ConflictError } from "../../lib/errors.js";
+import { ValidationError, NotFoundError, ConflictError, AppError } from "../../lib/errors.js";
+import { publishVideoToYouTube } from "./youtube-publish.js";
 const router = Router();
 router.use(...authAndOrg);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -121,6 +122,49 @@ router.post("/upload", upload.single("video"), async (req, res) => {
         throw error;
     }
     res.status(201).json({ data: { asset_id: asset.id, file_name: asset.file_name, size_bytes: asset.size_bytes } });
+});
+// POST /api/videos/upload-thumbnail - Upload de thumbnail
+const thumbnailStorage = multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    filename: (_req, file, cb) => {
+        const ext = path.extname(file.originalname);
+        const name = path.basename(file.originalname, ext).replace(/[^a-zA-Z0-9-_]/g, "_");
+        const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        cb(null, `thumb-${name}-${unique}${ext}`);
+    },
+});
+const thumbnailUpload = multer({
+    storage: thumbnailStorage,
+    limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+    fileFilter: (_req, file, cb) => {
+        const allowed = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+        if (allowed.includes(file.mimetype))
+            cb(null, true);
+        else
+            cb(new ValidationError("Tipo de arquivo não suportado. Use JPEG, PNG, WebP ou GIF"));
+    },
+});
+router.post("/upload-thumbnail", thumbnailUpload.single("thumbnail"), async (req, res) => {
+    if (!req.file)
+        throw new ValidationError("Arquivo de thumbnail obrigatório");
+    const supabase = getSupabase();
+    const { data: asset, error } = await supabase
+        .from("content_assets")
+        .insert({
+        organization_id: req.organizationId,
+        uploaded_by: req.userId,
+        storage_path: req.file.path,
+        file_name: req.file.originalname,
+        mime_type: req.file.mimetype,
+        size_bytes: req.file.size,
+    })
+        .select()
+        .single();
+    if (error) {
+        await fs.unlink(req.file.path).catch(() => { });
+        throw error;
+    }
+    res.status(201).json({ data: { asset_id: asset.id, file_name: asset.file_name, file_path: req.file.filename } });
 });
 // POST /api/videos - Criar vídeo (metadados + asset já feito upload)
 router.post("/", async (req, res) => {
@@ -275,18 +319,106 @@ router.post("/:id/schedule", async (req, res) => {
 // POST /api/videos/:id/publish-now - Publicar imediatamente
 router.post("/:id/publish-now", async (req, res) => {
     const supabase = getSupabase();
+    // Buscar vídeo completo com asset
     const { data: video, error } = await supabase
         .from("youtube_videos")
-        .update({ status: "publishing", updated_at: new Date().toISOString() })
+        .select(`
+      id, title, description, tags, category_id, privacy_status, publish_at,
+      made_for_kids, license, language, recording_date, location_lat, location_lng,
+      playlist_id, thumbnail_path, status, social_account_id, asset_id, organization_id,
+      scheduled_post_id,
+      content_assets!asset_id(storage_path, file_name, mime_type, size_bytes),
+      social_accounts!social_account_id(account_name, provider_account_id)
+    `)
         .eq("id", req.params.id)
         .eq("organization_id", req.organizationId)
-        .select()
         .single();
     if (error || !video)
         throw new NotFoundError("Vídeo");
-    // O job de publicação vai pegar este vídeo (status=publishing)
-    // Por enquanto retorna sucesso; a publicação real é assíncrona
-    res.json({ data: { message: "Vídeo enviado para fila de publicação", video } });
+    if (!["draft", "scheduled", "failed"].includes(video.status)) {
+        throw new AppError(`Não é possível publicar vídeo com status ${video.status}`, 400, "INVALID_STATUS");
+    }
+    if (!video.asset_id)
+        throw new AppError("Vídeo precisa ter arquivo enviado antes de publicar", 400, "MISSING_ASSET");
+    const asset = Array.isArray(video.content_assets) ? video.content_assets[0] : video.content_assets;
+    const scheduledPostId = video.scheduled_post_id;
+    if (!asset)
+        throw new NotFoundError("Arquivo de vídeo");
+    // Marcar como publishing
+    await supabase
+        .from("youtube_videos")
+        .update({ status: "publishing", updated_at: new Date().toISOString() })
+        .eq("id", video.id);
+    try {
+        const metadata = {
+            title: video.title,
+            description: video.description,
+            tags: video.tags,
+            categoryId: video.category_id,
+            privacyStatus: video.privacy_status,
+            publishAt: video.publish_at,
+            madeForKids: video.made_for_kids,
+            license: video.license,
+            language: video.language,
+            recordingDate: video.recording_date,
+            locationLat: video.location_lat,
+            locationLng: video.location_lng,
+            playlistId: video.playlist_id,
+        };
+        const result = await publishVideoToYouTube({
+            organizationId: video.organization_id,
+            socialAccountId: video.social_account_id,
+            videoId: video.id,
+            filePath: asset.storage_path,
+            metadata,
+        });
+        await supabase
+            .from("youtube_videos")
+            .update({
+            status: "published",
+            youtube_video_id: result.youtubeVideoId,
+            published_at: result.publishedAt ?? new Date().toISOString(),
+            youtube_error: null,
+            updated_at: new Date().toISOString(),
+        })
+            .eq("id", video.id);
+        // Atualizar scheduled_post se existir
+        if (scheduledPostId) {
+            await supabase
+                .from("scheduled_posts")
+                .update({ status: "published", published_at: result.publishedAt })
+                .eq("id", scheduledPostId);
+            await supabase
+                .from("scheduled_post_targets")
+                .update({ platform_status: "published", platform_post_id: result.youtubeVideoId })
+                .eq("scheduled_post_id", scheduledPostId)
+                .eq("platform_id", "youtube");
+        }
+        res.json({ data: { message: "Vídeo publicado com sucesso", youtubeVideoId: result.youtubeVideoId, video } });
+    }
+    catch (err) {
+        const errorMsg = err instanceof Error ? err.message : "Erro desconhecido";
+        await supabase
+            .from("youtube_videos")
+            .update({
+            status: "failed",
+            youtube_error: errorMsg,
+            updated_at: new Date().toISOString(),
+        })
+            .eq("id", video.id);
+        if (scheduledPostId) {
+            await supabase
+                .from("scheduled_posts")
+                .update({ status: "failed", error_message: errorMsg })
+                .eq("id", scheduledPostId);
+            await supabase
+                .from("scheduled_post_targets")
+                .update({ platform_status: "failed", platform_error: errorMsg })
+                .eq("scheduled_post_id", scheduledPostId)
+                .eq("platform_id", "youtube");
+        }
+        throw new AppError(`Falha na publicação: ${errorMsg}`, 500, "PUBLISH_FAILED");
+    }
 });
 // DELETE /api/videos/:id - Excluir vídeo (apenas se draft)
 router.delete("/:id", async (req, res) => {

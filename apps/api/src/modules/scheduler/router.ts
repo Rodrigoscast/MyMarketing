@@ -2,7 +2,8 @@ import { Router, Response } from "express";
 import { z } from "zod";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg, AuthenticatedRequest } from "../auth/middleware.js";
-import { NotFoundError } from "../../lib/errors.js";
+import { NotFoundError, AppError } from "../../lib/errors.js";
+import { processPublicationQueue } from "./worker.js";
 
 const router = Router();
 router.use(...authAndOrg);
@@ -67,6 +68,130 @@ router.post("/retry/:id", async (req: AuthenticatedRequest, res: Response) => {
 
   if (updateError) throw updateError;
   res.json({ data: updated });
+});
+
+// POST /api/scheduler/run - Executar worker de publicação manualmente (para testes)
+router.post("/run", async (req: AuthenticatedRequest, res: Response) => {
+  const result = await processPublicationQueue();
+  res.json({ data: result });
+});
+
+// POST /api/scheduler/process-now/:id - Processar um vídeo específico agora
+router.post("/process-now/:id", async (req: AuthenticatedRequest, res: Response) => {
+  const supabase = getSupabase();
+
+  // Verificar vídeo
+  const { data: video, error } = await supabase
+    .from("youtube_videos")
+    .select(`
+      id, title, description, tags, category_id, privacy_status, publish_at,
+      made_for_kids, license, language, recording_date, location_lat, location_lng,
+      playlist_id, thumbnail_path, status, social_account_id, asset_id, organization_id,
+      scheduled_post_id,
+      content_assets!asset_id(storage_path, file_name, mime_type, size_bytes),
+      social_accounts!social_account_id(account_name, provider_account_id)
+    `)
+    .eq("id", req.params.id)
+    .eq("organization_id", req.organizationId!)
+    .single();
+
+  if (error || !video) throw new NotFoundError("Vídeo");
+  if (!["draft", "scheduled", "failed"].includes(video.status)) {
+    throw new AppError(`Não é possível publicar vídeo com status ${video.status}`, 400, "INVALID_STATUS");
+  }
+  if (!video.asset_id) throw new AppError("Vídeo precisa ter arquivo enviado", 400, "MISSING_ASSET");
+
+  const asset = Array.isArray(video.content_assets) ? video.content_assets[0] : video.content_assets;
+  const scheduledPostId: string | null = video.scheduled_post_id;
+  if (!asset) throw new NotFoundError("Arquivo de vídeo");
+
+  // Marcar como publishing
+  await supabase
+    .from("youtube_videos")
+    .update({ status: "publishing", updated_at: new Date().toISOString() })
+    .eq("id", video.id);
+
+  try {
+    // Importar aqui para evitar dependência circular
+    const { publishVideoToYouTube } = await import("../videos/youtube-publish.js");
+
+    const metadata = {
+      title: video.title,
+      description: video.description,
+      tags: video.tags,
+      categoryId: video.category_id,
+      privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
+      publishAt: video.publish_at,
+      madeForKids: video.made_for_kids,
+      license: video.license as "youtube" | "creativeCommon",
+      language: video.language,
+      recordingDate: video.recording_date,
+      locationLat: video.location_lat,
+      locationLng: video.location_lng,
+      playlistId: video.playlist_id,
+    };
+
+    const result = await publishVideoToYouTube({
+      organizationId: video.organization_id,
+      socialAccountId: video.social_account_id,
+      videoId: video.id,
+      filePath: asset.storage_path,
+      metadata,
+    });
+
+    await supabase
+      .from("youtube_videos")
+      .update({
+        status: "published",
+        youtube_video_id: result.youtubeVideoId,
+        published_at: result.publishedAt ?? new Date().toISOString(),
+        youtube_error: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", video.id);
+
+    // Atualizar scheduled_post se existir
+    if (scheduledPostId) {
+      await supabase
+        .from("scheduled_posts")
+        .update({ status: "published", published_at: result.publishedAt })
+        .eq("id", scheduledPostId);
+
+      await supabase
+        .from("scheduled_post_targets")
+        .update({ platform_status: "published", platform_post_id: result.youtubeVideoId })
+        .eq("scheduled_post_id", scheduledPostId)
+        .eq("platform_id", "youtube");
+    }
+
+    res.json({ data: { message: "Vídeo publicado com sucesso", youtubeVideoId: result.youtubeVideoId } });
+  } catch (err) {
+    const errorMsg = err instanceof Error ? err.message : "Erro desconhecido";
+
+    await supabase
+      .from("youtube_videos")
+      .update({
+        status: "failed",
+        youtube_error: errorMsg,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", video.id);
+
+    if (scheduledPostId) {
+      await supabase
+        .from("scheduled_posts")
+        .update({ status: "failed", error_message: errorMsg })
+        .eq("id", scheduledPostId);
+
+      await supabase
+        .from("scheduled_post_targets")
+        .update({ platform_status: "failed", platform_error: errorMsg })
+        .eq("scheduled_post_id", scheduledPostId)
+        .eq("platform_id", "youtube");
+    }
+
+    throw new AppError(`Falha na publicação: ${errorMsg}`, 500, "PUBLISH_FAILED");
+  }
 });
 
 export default router;
