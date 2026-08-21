@@ -14,11 +14,13 @@
     "cors": "latest",
     "dotenv": "latest",
     "express": "latest",
+    "multer": "latest",
     "zod": "latest"
   },
   "devDependencies": {
     "@types/cors": "latest",
     "@types/express": "latest",
+    "@types/multer": "latest",
     "@types/node": "latest",
     "tsx": "latest",
     "typescript": "latest"
