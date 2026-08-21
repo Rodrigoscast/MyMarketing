@@ -3,6 +3,7 @@ import { z } from "zod";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg } from "../auth/middleware.js";
 import { NotFoundError } from "../../lib/errors.js";
+import { collectAnalyticsForOrg, collectAnalyticsForVideo } from "./worker.js";
 const router = Router();
 router.use(...authAndOrg);
 // GET /api/analytics/overview - Visão geral de engajamento da org
@@ -144,5 +145,20 @@ router.get("/comparison", async (req, res) => {
     res.json({
         data: Object.fromEntries(grouped),
     });
+});
+// POST /api/analytics/collect - Coletar métricas e comentários para toda a org
+router.post("/collect", async (req, res) => {
+    const result = await collectAnalyticsForOrg(req.organizationId);
+    res.json({ data: result });
+});
+// POST /api/analytics/collect/:videoId - Coletar métricas para um vídeo específico
+const collectVideoSchema = z.object({
+    socialAccountId: z.string().uuid(),
+});
+router.post("/collect/:videoId", async (req, res) => {
+    const { socialAccountId } = collectVideoSchema.parse(req.body);
+    const videoId = Array.isArray(req.params.videoId) ? req.params.videoId[0] : req.params.videoId;
+    const result = await collectAnalyticsForVideo(req.organizationId, socialAccountId, videoId);
+    res.json({ data: result });
 });
 export default router;

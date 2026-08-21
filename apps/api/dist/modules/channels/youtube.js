@@ -101,6 +101,7 @@ export async function getAuthenticatedYouTubeClient(organizationId, socialAccoun
     oauth2Client.setCredentials({ access_token: accessToken });
     return {
         youtube: google.youtube({ version: "v3", auth: oauth2Client }),
+        youtubeAnalytics: google.youtubeAnalytics({ version: "v2", auth: oauth2Client }),
         channelId: account.provider_account_id,
     };
 }

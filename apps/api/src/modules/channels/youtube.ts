@@ -1,4 +1,4 @@
-import { google, youtube_v3 } from "googleapis";
+import { google, youtube_v3, youtubeAnalytics_v2 } from "googleapis";
 import { decrypt, encrypt } from "../../lib/crypto.js";
 import { getSupabase } from "../../lib/supabase.js";
 import { env } from "../../config/index.js";
@@ -116,7 +116,7 @@ export async function refreshAccessToken(encryptedRefreshToken: string): Promise
 export async function getAuthenticatedYouTubeClient(
   organizationId: string,
   socialAccountId: string
-): Promise<{ youtube: youtube_v3.Youtube; channelId: string }> {
+): Promise<{ youtube: youtube_v3.Youtube; youtubeAnalytics: youtubeAnalytics_v2.Youtubeanalytics; channelId: string }> {
   const supabase = getSupabase();
 
   const { data: account, error } = await supabase
@@ -137,6 +137,7 @@ export async function getAuthenticatedYouTubeClient(
 
   return {
     youtube: google.youtube({ version: "v3", auth: oauth2Client }),
+    youtubeAnalytics: google.youtubeAnalytics({ version: "v2", auth: oauth2Client }),
     channelId: account.provider_account_id,
   };
 }

@@ -2,7 +2,8 @@ import { Router, Response } from "express";
 import { z } from "zod";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg, AuthenticatedRequest } from "../auth/middleware.js";
-import { NotFoundError } from "../../lib/errors.js";
+import { NotFoundError, AppError } from "../../lib/errors.js";
+import { collectAnalyticsForOrg, collectAnalyticsForVideo } from "./worker.js";
 
 interface VideoRef {
   id: string;
@@ -198,6 +199,24 @@ router.get("/comparison", async (req: AuthenticatedRequest, res: Response) => {
   res.json({
     data: Object.fromEntries(grouped),
   });
+});
+
+// POST /api/analytics/collect - Coletar métricas e comentários para toda a org
+router.post("/collect", async (req: AuthenticatedRequest, res: Response) => {
+  const result = await collectAnalyticsForOrg(req.organizationId!);
+  res.json({ data: result });
+});
+
+// POST /api/analytics/collect/:videoId - Coletar métricas para um vídeo específico
+const collectVideoSchema = z.object({
+  socialAccountId: z.string().uuid(),
+});
+
+router.post("/collect/:videoId", async (req: AuthenticatedRequest, res: Response) => {
+  const { socialAccountId } = collectVideoSchema.parse(req.body);
+  const videoId = Array.isArray(req.params.videoId) ? req.params.videoId[0] : req.params.videoId;
+  const result = await collectAnalyticsForVideo(req.organizationId!, socialAccountId, videoId);
+  res.json({ data: result });
 });
 
 export default router;
