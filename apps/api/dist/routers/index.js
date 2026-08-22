@@ -3,6 +3,7 @@ import channelsRouter from "../modules/channels/router.js";
 import videosRouter from "../modules/videos/router.js";
 import schedulerRouter from "../modules/scheduler/router.js";
 import analyticsRouter from "../modules/analytics/router.js";
+import quotaRouter from "../modules/analytics/quota-router.js";
 const apiRouter = Router();
 // Health check (sem auth)
 apiRouter.get("/health", (_req, res) => {
@@ -13,6 +14,7 @@ apiRouter.use("/channels", channelsRouter);
 apiRouter.use("/videos", videosRouter);
 apiRouter.use("/scheduler", schedulerRouter);
 apiRouter.use("/analytics", analyticsRouter);
+apiRouter.use("/analytics", quotaRouter);
 // Rotas legadas mantidas para compatibilidade (dashboard existente)
 apiRouter.get("/platforms", (_req, res) => {
     res.json({

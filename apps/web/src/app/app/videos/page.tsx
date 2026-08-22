@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, Suspense } from "react";
+import { useEffect, useState, Suspense, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Video,
@@ -26,6 +26,10 @@ import {
   RefreshCw,
   ChevronDown,
   ChevronUp,
+  Copy,
+  CheckSquare,
+  Square,
+  Menu,
 } from "lucide-react";
 import { apiFetch } from "@/lib/api";
 
@@ -173,6 +177,10 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [selectedThumbnail, setSelectedThumbnail] = useState<File | null>(null);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkActionOpen, setBulkActionOpen] = useState(false);
+  const [bulkLoading, setBulkLoading] = useState(false);
+  const selectAllRef = useRef<HTMLInputElement>(null);
 
   const loadVideos = async () => {
     try {
@@ -466,8 +474,118 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
     }
   };
 
+  const handleClone = async (video: YouTubeVideo) => {
+    const newTitle = prompt(`Título para a cópia:`, `Cópia de ${video.title}`);
+    if (!newTitle) return;
+
+    const copyAsset = confirm("Deseja copiar o arquivo de vídeo também? (Isso criará um novo upload)");
+
+    try {
+      await apiFetch(`/api/videos/${video.id}/clone`, {
+        method: "POST",
+        body: JSON.stringify({
+          title: newTitle,
+          copyAsset,
+          resetStatus: true,
+        }),
+      });
+      setMessage({ type: "success", text: "Vídeo duplicado com sucesso!" });
+      loadVideos();
+    } catch (err) {
+      console.error("Erro ao duplicar:", err);
+      setMessage({ type: "error", text: "Falha ao duplicar vídeo" });
+    }
+  };
+
   const handleOpenYouTube = (videoId: string) => {
     window.open(`https://www.youtube.com/watch?v=${videoId}`, "_blank");
+  };
+
+  const handleSelectAll = () => {
+    if (selectedIds.size === videos.length) {
+      setSelectedIds(new Set());
+    } else {
+      setSelectedIds(new Set(videos.map(v => v.id)));
+    }
+  };
+
+  // Atualizar indeterminate state via ref
+  useEffect(() => {
+    if (selectAllRef.current) {
+      selectAllRef.current.indeterminate = selectedIds.size > 0 && selectedIds.size < videos.length;
+    }
+  }, [selectedIds, videos.length]);
+
+  const handleSelectOne = (id: string) => {
+    const newSet = new Set(selectedIds);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setSelectedIds(newSet);
+  };
+
+  const handleBulkAction = async (operation: string, extraData?: any) => {
+    if (selectedIds.size === 0) return;
+
+    setBulkLoading(true);
+    try {
+      const response = await apiFetch<{ data: { results: any[]; summary: any } }>("/api/videos/bulk", {
+        method: "POST",
+        body: JSON.stringify({
+          videoIds: Array.from(selectedIds),
+          operation,
+          ...extraData,
+        }),
+      });
+
+      const { results, summary } = response.data;
+      const failed = results.filter(r => !r.success);
+
+      if (failed.length > 0) {
+        setMessage({ type: "error", text: `${failed.length} de ${summary.total} falharam. Verifique a lista.` });
+      } else {
+        setMessage({ type: "success", text: `${summary.success} vídeo(s) processados com sucesso!` });
+      }
+
+      setSelectedIds(new Set());
+      setBulkActionOpen(false);
+      loadVideos();
+    } catch (err) {
+      console.error("Erro na operação em lote:", err);
+      setMessage({ type: "error", text: "Falha na operação em lote" });
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleBulkSchedule = () => {
+    const date = prompt("Data/hora para agendar (YYYY-MM-DDTHH:MM):");
+    if (!date) return;
+    handleBulkAction("schedule", { scheduledFor: date, timezone: "America/Sao_Paulo" });
+  };
+
+  const handleBulkPublish = () => {
+    if (!confirm(`Publicar ${selectedIds.size} vídeo(s) agora no YouTube?`)) return;
+    handleBulkAction("publish");
+  };
+
+  const handleBulkDelete = () => {
+    if (!confirm(`Excluir ${selectedIds.size} vídeo(s) em rascunho? Esta ação não pode ser desfeita.`)) return;
+    handleBulkAction("delete");
+  };
+
+  const handleBulkChangePrivacy = (privacyStatus: "private" | "unlisted" | "public") => {
+    handleBulkAction("change_privacy", { privacyStatus });
+  };
+
+  const handleBulkChangeCategory = () => {
+    const catId = prompt("ID da categoria (ex: 22 para Pessoas e Blogs):");
+    if (!catId) return;
+    handleBulkAction("change_category", { categoryId: catId });
+  };
+
+  const handleBulkChangePlaylist = () => {
+    const playlistId = prompt("Playlist ID (deixe vazio para remover):");
+    handleBulkAction("change_playlist", { playlistId: playlistId || undefined });
   };
 
   const formatFileSize = (bytes: number) => {
@@ -860,24 +978,94 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
                 <p>Faça upload do seu primeiro vídeo e configure os metadados para publicar no YouTube.</p>
               </div>
             ) : (
-              <div className="videos-table-container">
-                <table className="videos-table">
-                  <thead>
-                    <tr>
-                      <th>Vídeo</th>
-                      <th>Título</th>
-                      <th>Canal</th>
-                      <th>Status</th>
-                      <th>Agendado para</th>
-                      <th>Ações</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {videos.map(video => {
+              <>
+                {/* Barra de ações em lote quando itens selecionados */}
+                {selectedIds.size > 0 && (
+                  <div className="bulk-actions-bar" style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "12px",
+                    padding: "12px 16px",
+                    background: "#f0fdfa",
+                    border: "1px solid #a7f3d0",
+                    borderRadius: "8px",
+                    marginBottom: "16px",
+                    flexWrap: "wrap",
+                  }}>
+                    <span style={{ fontWeight: 500, color: "#065f46" }}>
+                      {selectedIds.size} vídeo(s) selecionado(s)
+                    </span>
+                    <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                      <button className="secondary-button" onClick={handleBulkSchedule} disabled={bulkLoading} title="Agendar selecionados">
+                        <Calendar size={14} /> Agendar
+                      </button>
+                      <button className="primary-button" onClick={handleBulkPublish} disabled={bulkLoading} title="Publicar agora">
+                        <Send size={14} /> Publicar agora
+                      </button>
+                      <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
+                        <span style={{ fontSize: "12px", color: "#6b7280" }}>Privacidade:</span>
+                        <button className="icon-button secondary" onClick={() => handleBulkChangePrivacy("private")} disabled={bulkLoading} title="Privado">
+                          <Lock size={14} />
+                        </button>
+                        <button className="icon-button secondary" onClick={() => handleBulkChangePrivacy("unlisted")} disabled={bulkLoading} title="Não listado">
+                          <Eye size={14} />
+                        </button>
+                        <button className="icon-button secondary" onClick={() => handleBulkChangePrivacy("public")} disabled={bulkLoading} title="Público">
+                          <Globe size={14} />
+                        </button>
+                      </div>
+                      <button className="secondary-button" onClick={handleBulkChangeCategory} disabled={bulkLoading} title="Alterar categoria">
+                        <Tag size={14} /> Categoria
+                      </button>
+                      <button className="secondary-button" onClick={handleBulkChangePlaylist} disabled={bulkLoading} title="Alterar playlist">
+                        <Menu size={14} /> Playlist
+                      </button>
+                      <button className="icon-button danger" onClick={handleBulkDelete} disabled={bulkLoading} title="Excluir selecionados">
+                        <Trash2 size={14} />
+                      </button>
+                      <button className="icon-button secondary" onClick={() => setSelectedIds(new Set())} disabled={bulkLoading} title="Limpar seleção">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="videos-table-container">
+                  <table className="videos-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: "48px" }}>
+                          <input
+                            ref={selectAllRef}
+                            type="checkbox"
+                            checked={selectedIds.size === videos.length && videos.length > 0}
+                            onChange={handleSelectAll}
+                            aria-label="Selecionar todos"
+                          />
+                        </th>
+                        <th>Vídeo</th>
+                        <th>Título</th>
+                        <th>Canal</th>
+                        <th>Status</th>
+                        <th>Agendado para</th>
+                        <th>Ações</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {videos.map(video => {
                       const status = getStatusBadge(video.status);
                       const isEditing = editingId === video.id;
+                      const isSelected = selectedIds.has(video.id);
                       return (
-                        <tr key={video.id} className={isEditing ? "editing" : ""}>
+                        <tr key={video.id} className={`${isEditing ? "editing" : ""} ${isSelected ? "selected" : ""}`}>
+                          <td style={{ textAlign: "center" }}>
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => handleSelectOne(video.id)}
+                              aria-label={`Selecionar ${video.title}`}
+                            />
+                          </td>
                           <td>
                             {video.content_assets && (
                               <div className="video-thumb" style={{ width: "80px", height: "45px", background: "#ecfdf5", borderRadius: "6px", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -955,6 +1143,12 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
                                       {deletingId === video.id ? <Loader2 size={16} className="spin" /> : <Trash2 size={16} />}
                                     </button>
                                   )}
+                                  {/* Botão duplicar - disponível para todos os status exceto publishing */}
+                                  {video.status !== "publishing" && (
+                                    <button className="icon-button secondary" onClick={() => handleClone(video)} title="Duplicar vídeo">
+                                      <Copy size={16} />
+                                    </button>
+                                  )}
                                 </>
                               )}
                             </div>
@@ -965,7 +1159,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
                   </tbody>
                 </table>
               </div>
-            )}
+            </>)}
           </div>
         </section>
 
@@ -1290,6 +1484,8 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
           }
           .videos-table tr:last-child td { border-bottom: none; }
           .videos-table tr.editing { background: #f0fdfa; }
+          .videos-table tr.selected { background: #e6fdf8; }
+          .videos-table tr.selected:hover { background: #d1fae5; }
           .video-id { display: block; font-size: 11px; color: #9ca3af; font-family: monospace; margin-top: 2px; }
           .video-error { display: block; font-size: 11px; color: #dc2626; margin-top: 2px; }
 

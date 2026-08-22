@@ -28,6 +28,7 @@ import {
   Video
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
+import { QuotaWidget, QuotaBadge } from "@/components/QuotaWidget";
 
 const revenueData = [
   { day: "Seg", receita: 32000, investimento: 8400 },
@@ -122,6 +123,9 @@ export function DashboardExperience() {
             <span>ROI</span>
             <strong>4.8x</strong>
             <small>Google Ads e Meta Ads</small>
+          </article>
+          <article className="metric-card">
+            <QuotaBadge />
           </article>
         </section>
 

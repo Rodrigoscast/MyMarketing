@@ -9,6 +9,7 @@ import { authAndOrg, AuthenticatedRequest } from "../auth/middleware.js";
 import { env } from "../../config/index.js";
 import { ValidationError, NotFoundError, ConflictError, AppError } from "../../lib/errors.js";
 import { publishVideoToYouTube } from "./youtube-publish.js";
+import { checkQuotaForUpload, logQuotaUsage, QUOTA_COSTS } from "../analytics/quota.js";
 
 const router = Router();
 router.use(...authAndOrg);
@@ -368,6 +369,12 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
   }
   if (!video.asset_id) throw new AppError("Vídeo precisa ter arquivo enviado antes de publicar", 400, "MISSING_ASSET");
 
+  // Verificar quota antes de publicar
+  const quotaCheck = await checkQuotaForUpload(video.organization_id);
+  if (!quotaCheck.canUpload) {
+    throw new AppError(quotaCheck.error ?? "Quota insuficiente para upload", 429, "QUOTA_EXCEEDED");
+  }
+
   const asset = Array.isArray(video.content_assets) ? video.content_assets[0] : video.content_assets;
   const scheduledPostId: string | null = video.scheduled_post_id;
   if (!asset) throw new NotFoundError("Arquivo de vídeo");
@@ -402,6 +409,9 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
       filePath: asset.storage_path,
       metadata,
     });
+
+    // Registrar uso de quota
+    await logQuotaUsage(video.organization_id, "VIDEOS_INSERT", { videoId: video.id, youtubeVideoId: result.youtubeVideoId });
 
     await supabase
       .from("youtube_videos")
@@ -456,6 +466,481 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
 
     throw new AppError(`Falha na publicação: ${errorMsg}`, 500, "PUBLISH_FAILED");
   }
+});
+
+// POST /api/videos/:id/clone - Duplicar vídeo (criar template ou cópia)
+const cloneVideoSchema = z.object({
+  title: z.string().min(1).max(100).optional(), // Se não fornecido, usa "Cópia de {original title}"
+  copyAsset: z.boolean().default(false), // Se true, copia o arquivo de vídeo; se false, usa o mesmo asset
+  resetStatus: z.boolean().default(true), // Se true, novo vídeo fica como draft; se false, mantém status original
+  socialAccountId: z.string().uuid().optional(), // Opcional: publicar em outro canal
+});
+
+router.post("/:id/clone", async (req: AuthenticatedRequest, res: Response) => {
+  const payload = cloneVideoSchema.parse(req.body);
+  const supabase = getSupabase();
+
+  // Buscar vídeo original com todos os dados
+  const { data: originalVideo, error } = await supabase
+    .from("youtube_videos")
+    .select(`
+      *,
+      content_assets!asset_id(storage_path, file_name, mime_type, size_bytes),
+      social_accounts!social_account_id(account_name, provider_account_id)
+    `)
+    .eq("id", req.params.id)
+    .eq("organization_id", req.organizationId!)
+    .single();
+
+  if (error || !originalVideo) throw new NotFoundError("Vídeo original");
+
+  // Determinar canal de destino
+  let targetSocialAccountId = originalVideo.social_account_id;
+  if (payload.socialAccountId) {
+    const { data: channel } = await supabase
+      .from("social_accounts")
+      .select("id")
+      .eq("id", payload.socialAccountId)
+      .eq("organization_id", req.organizationId!)
+      .eq("platform_id", "youtube")
+      .single();
+    if (!channel) throw new NotFoundError("Canal do YouTube de destino");
+    targetSocialAccountId = channel.id;
+  }
+
+  let newAssetId = originalVideo.asset_id;
+
+  // Se copyAsset = true, copiar o arquivo físico
+  if (payload.copyAsset && originalVideo.asset_id) {
+    const { data: asset } = await supabase
+      .from("content_assets")
+      .select("storage_path, file_name, mime_type, size_bytes")
+      .eq("id", originalVideo.asset_id)
+      .single();
+
+    if (asset) {
+      const ext = path.extname(asset.file_name);
+      const name = path.basename(asset.file_name, ext).replace(/[^a-zA-Z0-9-_]/g, "_");
+      const unique = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const newFileName = `${name}-copy-${unique}${ext}`;
+      const newStoragePath = path.resolve(UPLOAD_DIR, newFileName);
+
+      await fs.copyFile(asset.storage_path, newStoragePath);
+
+      const { data: newAsset, error: assetError } = await supabase
+        .from("content_assets")
+        .insert({
+          organization_id: req.organizationId!,
+          uploaded_by: req.userId,
+          storage_path: newStoragePath,
+          file_name: asset.file_name,
+          mime_type: asset.mime_type,
+          size_bytes: asset.size_bytes,
+        })
+        .select()
+        .single();
+
+      if (assetError) {
+        await fs.unlink(newStoragePath).catch(() => {});
+        throw assetError;
+      }
+      newAssetId = newAsset.id;
+    }
+  }
+
+  // Determinar novo título
+  const newTitle = payload.title ?? `Cópia de ${originalVideo.title}`;
+
+  // Determinar status
+  const newStatus = payload.resetStatus ? "draft" : originalVideo.status;
+
+  // Criar novo vídeo
+  const { data: newVideo, error: createError } = await supabase
+    .from("youtube_videos")
+    .insert({
+      organization_id: req.organizationId!,
+      social_account_id: targetSocialAccountId,
+      asset_id: newAssetId,
+      title: newTitle,
+      description: originalVideo.description,
+      tags: originalVideo.tags,
+      category_id: originalVideo.category_id,
+      privacy_status: originalVideo.privacy_status,
+      publish_at: null, // Resetar agendamento
+      made_for_kids: originalVideo.made_for_kids,
+      license: originalVideo.license,
+      language: originalVideo.language,
+      recording_date: originalVideo.recording_date,
+      location_lat: originalVideo.location_lat,
+      location_lng: originalVideo.location_lng,
+      playlist_id: originalVideo.playlist_id,
+      thumbnail_path: originalVideo.thumbnail_path,
+      status: newStatus,
+    })
+    .select()
+    .single();
+
+  if (createError) {
+    // Se copiou o asset e falhou, limpar
+    if (payload.copyAsset && newAssetId !== originalVideo.asset_id) {
+      const { data: newAsset } = await supabase
+        .from("content_assets")
+        .select("storage_path")
+        .eq("id", newAssetId)
+        .single();
+      if (newAsset) await fs.unlink(newAsset.storage_path).catch(() => {});
+      await supabase.from("content_assets").delete().eq("id", newAssetId);
+    }
+    throw createError;
+  }
+
+  res.status(201).json({ data: newVideo });
+});
+
+// POST /api/videos/bulk - Operações em lote
+const bulkOperationSchema = z.object({
+  videoIds: z.array(z.string().uuid()).min(1).max(50),
+  operation: z.enum(["delete", "schedule", "publish", "change_privacy", "change_category", "change_playlist"]),
+  // Parâmetros específicos por operação
+  scheduledFor: z.string().datetime().optional(), // para schedule
+  timezone: z.string().default("America/Sao_Paulo"), // para schedule
+  privacyStatus: z.enum(["private", "unlisted", "public"]).optional(), // para change_privacy
+  categoryId: z.string().optional(), // para change_category
+  playlistId: z.string().optional(), // para change_playlist
+});
+
+router.post("/bulk", async (req: AuthenticatedRequest, res: Response) => {
+  const payload = bulkOperationSchema.parse(req.body);
+  const supabase = getSupabase();
+
+  // Buscar todos os vídeos
+  const { data: videos, error } = await supabase
+    .from("youtube_videos")
+    .select(`
+      id, title, description, tags, category_id, privacy_status, publish_at,
+      made_for_kids, license, language, recording_date, location_lat, location_lng,
+      playlist_id, thumbnail_path, status, social_account_id, asset_id, organization_id,
+      scheduled_post_id,
+      content_assets!asset_id(storage_path, file_name, mime_type, size_bytes),
+      social_accounts!social_account_id(account_name, provider_account_id)
+    `)
+    .in("id", payload.videoIds)
+    .eq("organization_id", req.organizationId!);
+
+  if (error) throw error;
+  if (!videos || videos.length === 0) throw new NotFoundError("Nenhum vídeo encontrado");
+
+  // Verificar se todos pertencem à org
+  const invalidVideos = videos.filter(v => v.organization_id !== req.organizationId);
+  if (invalidVideos.length > 0) {
+    throw new AppError("Alguns vídeos não pertencem à sua organização", 403, "UNAUTHORIZED_VIDEOS");
+  }
+
+  const results: Array<{ videoId: string; success: boolean; error?: string; data?: any }> = [];
+
+  switch (payload.operation) {
+    case "delete": {
+      // Só pode excluir drafts
+      const nonDrafts = videos.filter(v => v.status !== "draft");
+      if (nonDrafts.length > 0) {
+        for (const video of nonDrafts) {
+          results.push({ videoId: video.id, success: false, error: "Só é possível excluir vídeos em rascunho" });
+        }
+      }
+
+      const drafts = videos.filter(v => v.status === "draft");
+      for (const video of drafts) {
+        try {
+          // Excluir asset se existir
+          if (video.asset_id) {
+            const { data: asset } = await supabase
+              .from("content_assets")
+              .select("storage_path")
+              .eq("id", video.asset_id)
+              .single();
+
+            if (asset) {
+              await fs.unlink(asset.storage_path).catch(() => {});
+            }
+            await supabase.from("content_assets").delete().eq("id", video.asset_id);
+          }
+
+          await supabase.from("youtube_videos").delete().eq("id", video.id);
+          results.push({ videoId: video.id, success: true });
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao excluir" });
+        }
+      }
+      break;
+    }
+
+    case "schedule": {
+      if (!payload.scheduledFor) {
+        throw new ValidationError("Data/hora de agendamento obrigatória");
+      }
+
+      for (const video of videos) {
+        try {
+          if (video.status !== "draft") {
+            results.push({ videoId: video.id, success: false, error: "Só é possível agendar vídeos em rascunho" });
+            continue;
+          }
+          if (!video.asset_id) {
+            results.push({ videoId: video.id, success: false, error: "Vídeo precisa ter arquivo enviado antes de agendar" });
+            continue;
+          }
+
+          // Atualizar vídeo para scheduled
+          const { data: updatedVideo, error: updateError } = await supabase
+            .from("youtube_videos")
+            .update({
+              status: "scheduled",
+              publish_at: payload.scheduledFor,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", video.id)
+            .select()
+            .single();
+
+          if (updateError) throw updateError;
+
+          // Criar entrada em scheduled_posts
+          const { data: scheduledPost, error: postError } = await supabase
+            .from("scheduled_posts")
+            .insert({
+              organization_id: req.organizationId!,
+              author_id: req.userId,
+              asset_id: video.asset_id,
+              title: video.title,
+              caption: video.description,
+              media_url: null,
+              media_type: "video",
+              status: "scheduled",
+              scheduled_for: payload.scheduledFor,
+              timezone: payload.timezone,
+            })
+            .select()
+            .single();
+
+          if (postError) throw postError;
+
+          await supabase.from("scheduled_post_targets").insert({
+            scheduled_post_id: scheduledPost.id,
+            platform_id: "youtube",
+            social_account_id: video.social_account_id,
+            platform_status: "queued",
+          });
+
+          results.push({ videoId: video.id, success: true, data: { video: updatedVideo, scheduledPost } });
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao agendar" });
+        }
+      }
+      break;
+    }
+
+    case "publish": {
+      for (const video of videos) {
+        try {
+          if (!["draft", "scheduled", "failed"].includes(video.status)) {
+            results.push({ videoId: video.id, success: false, error: `Não é possível publicar vídeo com status ${video.status}` });
+            continue;
+          }
+          if (!video.asset_id) {
+            results.push({ videoId: video.id, success: false, error: "Vídeo precisa ter arquivo enviado antes de publicar" });
+            continue;
+          }
+
+          // Verificar quota
+          const quotaCheck = await checkQuotaForUpload(video.organization_id);
+          if (!quotaCheck.canUpload) {
+            results.push({ videoId: video.id, success: false, error: quotaCheck.error ?? "Quota insuficiente para upload" });
+            continue;
+          }
+
+          const asset = Array.isArray(video.content_assets) ? video.content_assets[0] : video.content_assets;
+          const scheduledPostId: string | null = video.scheduled_post_id;
+          if (!asset) {
+            results.push({ videoId: video.id, success: false, error: "Arquivo de vídeo não encontrado" });
+            continue;
+          }
+
+          await supabase
+            .from("youtube_videos")
+            .update({ status: "publishing", updated_at: new Date().toISOString() })
+            .eq("id", video.id);
+
+          try {
+            const metadata = {
+              title: video.title,
+              description: video.description,
+              tags: video.tags,
+              categoryId: video.category_id,
+              privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
+              publishAt: video.publish_at,
+              madeForKids: video.made_for_kids,
+              license: video.license as "youtube" | "creativeCommon",
+              language: video.language,
+              recordingDate: video.recording_date,
+              locationLat: video.location_lat,
+              locationLng: video.location_lng,
+              playlistId: video.playlist_id,
+            };
+
+            const result = await publishVideoToYouTube({
+              organizationId: video.organization_id,
+              socialAccountId: video.social_account_id,
+              videoId: video.id,
+              filePath: asset.storage_path,
+              metadata,
+            });
+
+            await logQuotaUsage(video.organization_id, "VIDEOS_INSERT", { videoId: video.id, youtubeVideoId: result.youtubeVideoId });
+
+            await supabase
+              .from("youtube_videos")
+              .update({
+                status: "published",
+                youtube_video_id: result.youtubeVideoId,
+                published_at: result.publishedAt ?? new Date().toISOString(),
+                youtube_error: null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", video.id);
+
+            if (scheduledPostId) {
+              await supabase
+                .from("scheduled_posts")
+                .update({ status: "published", published_at: result.publishedAt })
+                .eq("id", scheduledPostId);
+
+              await supabase
+                .from("scheduled_post_targets")
+                .update({ platform_status: "published", platform_post_id: result.youtubeVideoId })
+                .eq("scheduled_post_id", scheduledPostId)
+                .eq("platform_id", "youtube");
+            }
+
+            results.push({ videoId: video.id, success: true, data: { youtubeVideoId: result.youtubeVideoId } });
+          } catch (err) {
+            const errorMsg = err instanceof Error ? err.message : "Erro desconhecido";
+
+            await supabase
+              .from("youtube_videos")
+              .update({
+                status: "failed",
+                youtube_error: errorMsg,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", video.id);
+
+            if (scheduledPostId) {
+              await supabase
+                .from("scheduled_posts")
+                .update({ status: "failed", error_message: errorMsg })
+                .eq("id", scheduledPostId);
+
+              await supabase
+                .from("scheduled_post_targets")
+                .update({ platform_status: "failed", platform_error: errorMsg })
+                .eq("scheduled_post_id", scheduledPostId)
+                .eq("platform_id", "youtube");
+            }
+
+            results.push({ videoId: video.id, success: false, error: `Falha na publicação: ${errorMsg}` });
+          }
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao publicar" });
+        }
+      }
+      break;
+    }
+
+    case "change_privacy": {
+      if (!payload.privacyStatus) {
+        throw new ValidationError("Novo status de privacidade obrigatório");
+      }
+
+      for (const video of videos) {
+        try {
+          const { data, error: updateError } = await supabase
+            .from("youtube_videos")
+            .update({
+              privacy_status: payload.privacyStatus,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", video.id)
+            .select()
+            .single();
+
+          if (updateError) throw updateError;
+          results.push({ videoId: video.id, success: true, data });
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao alterar privacidade" });
+        }
+      }
+      break;
+    }
+
+    case "change_category": {
+      if (!payload.categoryId) {
+        throw new ValidationError("Nova categoria obrigatória");
+      }
+
+      for (const video of videos) {
+        try {
+          const { data, error: updateError } = await supabase
+            .from("youtube_videos")
+            .update({
+              category_id: payload.categoryId,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", video.id)
+            .select()
+            .single();
+
+          if (updateError) throw updateError;
+          results.push({ videoId: video.id, success: true, data });
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao alterar categoria" });
+        }
+      }
+      break;
+    }
+
+    case "change_playlist": {
+      // playlistId pode ser null para remover
+      for (const video of videos) {
+        try {
+          const { data, error: updateError } = await supabase
+            .from("youtube_videos")
+            .update({
+              playlist_id: payload.playlistId ?? null,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", video.id)
+            .select()
+            .single();
+
+          if (updateError) throw updateError;
+          results.push({ videoId: video.id, success: true, data });
+        } catch (err) {
+          results.push({ videoId: video.id, success: false, error: err instanceof Error ? err.message : "Erro ao alterar playlist" });
+        }
+      }
+      break;
+    }
+  }
+
+  const successCount = results.filter(r => r.success).length;
+  const failCount = results.filter(r => !r.success).length;
+
+  res.json({
+    data: {
+      results,
+      summary: { total: videos.length, success: successCount, failed: failCount },
+    },
+  });
 });
 
 // DELETE /api/videos/:id - Excluir vídeo (apenas se draft)

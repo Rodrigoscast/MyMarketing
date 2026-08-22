@@ -2,6 +2,7 @@ import { getSupabase } from "../../lib/supabase.js";
 import { publishVideoToYouTube } from "../videos/youtube-publish.js";
 import { AppError } from "../../lib/errors.js";
 import { promises as fs } from "node:fs";
+import { checkQuotaForUpload, logQuotaUsage } from "../analytics/quota.js";
 /**
  * Worker de publicação - processa vídeos agendados e publica no YouTube
  * Deve ser executado periodicamente (ex: a cada minuto via cron)
@@ -65,6 +66,11 @@ export async function processPublicationQueue() {
             }
             // Verificar se arquivo existe
             await fs.access(asset.storage_path);
+            // Verificar quota antes de publicar
+            const quotaCheck = await checkQuotaForUpload(video.organization_id);
+            if (!quotaCheck.canUpload) {
+                throw new AppError(quotaCheck.error ?? "Quota insuficiente para upload", 429, "QUOTA_EXCEEDED");
+            }
             // Marcar como publishing
             await supabase
                 .from("youtube_videos")
@@ -94,6 +100,8 @@ export async function processPublicationQueue() {
                 filePath: asset.storage_path,
                 metadata,
             });
+            // Registrar uso de quota
+            await logQuotaUsage(video.organization_id, "VIDEOS_INSERT", { videoId, youtubeVideoId: result.youtubeVideoId });
             // Atualizar vídeo com sucesso
             await supabase
                 .from("youtube_videos")
