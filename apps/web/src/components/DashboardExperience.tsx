@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   Area,
   AreaChart,
@@ -18,6 +19,7 @@ import {
   Check,
   FileVideo,
   Gauge,
+  LogOut,
   Megaphone,
   Plus,
   Save,
@@ -29,6 +31,7 @@ import {
 } from "lucide-react";
 import { Logo } from "@/components/Logo";
 import { QuotaWidget, QuotaBadge } from "@/components/QuotaWidget";
+import { clearSession } from "@/lib/auth";
 
 const revenueData = [
   { day: "Seg", receita: 32000, investimento: 8400 },
@@ -48,11 +51,17 @@ const channelData = [
 ];
 
 export function DashboardExperience() {
+  const router = useRouter();
   const [chartsReady, setChartsReady] = useState(false);
 
   useEffect(() => {
     setChartsReady(true);
   }, []);
+
+  const handleLogout = () => {
+    clearSession();
+    router.push("/login");
+  };
 
   return (
     <main className="app-shell">
@@ -99,6 +108,9 @@ export function DashboardExperience() {
             </label>
             <button className="icon-button" aria-label="Notificacoes">
               <Bell size={19} />
+            </button>
+            <button className="icon-button" onClick={handleLogout} aria-label="Sair da conta" title="Sair">
+              <LogOut size={19} />
             </button>
           </div>
         </header>

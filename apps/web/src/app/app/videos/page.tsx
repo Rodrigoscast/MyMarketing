@@ -31,7 +31,7 @@ import {
   Square,
   Menu,
 } from "lucide-react";
-import { apiFetch } from "@/lib/api";
+import { apiFetch, apiUpload } from "@/lib/api";
 
 interface YouTubeChannel {
   id: string;
@@ -260,15 +260,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       const formData = new FormData();
       formData.append("video", selectedFile);
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3333"}/api/videos/upload`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-
-      if (!response.ok) throw new Error("Falha no upload");
-
-      const result = await response.json();
+      const result = await apiUpload<{ data: { file_name: string } }>("/api/videos/upload", formData);
       setMessage({ type: "success", text: `Upload concluído: ${result.data.file_name}` });
       setFormData(prev => ({ ...prev, thumbnailFileName: "" }));
       setSelectedFile(null);
@@ -290,15 +282,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       const formData = new FormData();
       formData.append("thumbnail", selectedThumbnail);
 
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3333"}/api/videos/upload-thumbnail`, {
-        method: "POST",
-        body: formData,
-        credentials: "include",
-      });
-
-      if (!response.ok) throw new Error("Falha no upload");
-
-      const result = await response.json();
+      const result = await apiUpload<{ data: { file_path: string } }>("/api/videos/upload-thumbnail", formData);
       setFormData(prev => ({ ...prev, thumbnailFileName: result.data.file_path }));
       setMessage({ type: "success", text: "Thumbnail enviado!" });
       setSelectedThumbnail(null);
@@ -330,13 +314,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       if (selectedFile) {
         const formDataUpload = new FormData();
         formDataUpload.append("video", selectedFile);
-        const uploadResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3333"}/api/videos/upload`, {
-          method: "POST",
-          body: formDataUpload,
-          credentials: "include",
-        });
-        if (!uploadResponse.ok) throw new Error("Falha no upload do vídeo");
-        const uploadResult = await uploadResponse.json();
+        const uploadResult = await apiUpload<{ data: { asset_id: string } }>("/api/videos/upload", formDataUpload);
         assetId = uploadResult.data.asset_id;
       }
 

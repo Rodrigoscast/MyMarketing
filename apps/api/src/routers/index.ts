@@ -1,4 +1,5 @@
 import { Router } from "express";
+import authRouter from "../modules/auth/router.js";
 import channelsRouter from "../modules/channels/router.js";
 import videosRouter from "../modules/videos/router.js";
 import schedulerRouter from "../modules/scheduler/router.js";
@@ -11,6 +12,9 @@ const apiRouter = Router();
 apiRouter.get("/health", (_req, res) => {
   res.json({ ok: true, service: "mymarketing-api", timestamp: new Date().toISOString() });
 });
+
+// Autenticação (pública)
+apiRouter.use("/auth", authRouter);
 
 // Rotas com autenticação
 apiRouter.use("/channels", channelsRouter);
