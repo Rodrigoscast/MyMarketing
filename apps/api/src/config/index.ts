@@ -14,11 +14,8 @@ const envSchema = z.object({
   GOOGLE_CLIENT_ID: z.string().optional(),
   GOOGLE_CLIENT_SECRET: z.string().optional(),
   GOOGLE_REDIRECT_URI: z.string().url().optional(),
-  // Crypto para refresh tokens (32 bytes em hex = 64 caracteres)
-  ENCRYPTION_KEY: z
-    .string()
-    .regex(/^[0-9a-fA-F]{64}$/, "ENCRYPTION_KEY deve ter 64 caracteres hex (32 bytes)")
-    .optional(),
+  // Crypto para refresh tokens
+  ENCRYPTION_KEY: z.string().length(64).optional(), // 32 bytes = 256 bits, hex = 64 chars
 });
 
 const parsed = envSchema.safeParse(process.env);

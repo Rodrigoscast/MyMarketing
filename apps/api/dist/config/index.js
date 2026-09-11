@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { z } from "zod";
 const envSchema = z.object({
     NODE_ENV: z.enum(["development", "production", "test"]).default("development"),
@@ -13,7 +14,7 @@ const envSchema = z.object({
     GOOGLE_CLIENT_SECRET: z.string().optional(),
     GOOGLE_REDIRECT_URI: z.string().url().optional(),
     // Crypto para refresh tokens
-    ENCRYPTION_KEY: z.string().length(32).optional(), // 32 bytes = 256 bits
+    ENCRYPTION_KEY: z.string().length(64).optional(), // 32 bytes = 256 bits, hex = 64 chars
 });
 const parsed = envSchema.safeParse(process.env);
 if (!parsed.success) {
