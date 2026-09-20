@@ -35,9 +35,11 @@ import {
   Loader2,
   Calendar,
   Filter,
+  RefreshCw,
 } from "lucide-react";
+import { AppSidebar } from "@/components/AppSidebar";
 import { apiFetch } from "@/lib/api";
-import { format, subDays, startOfDay, endOfDay, eachDayOfInterval } from "date-fns";
+import { format, parseISO, subDays, startOfDay, endOfDay, eachDayOfInterval } from "date-fns";
 import { ptBR } from "date-fns/locale";
 
 interface VideoMetrics {
@@ -107,6 +109,18 @@ interface TopVideo {
   subscribers_gained: number;
 }
 
+interface TopComment {
+  id: string;
+  video_id: string;
+  video_title: string;
+  author_name: string;
+  author_avatar_url: string | null;
+  text: string;
+  like_count: number;
+  reply_count: number;
+  published_at: string;
+}
+
 const formatNumber = (num: number) => {
   if (num >= 1000000) return (num / 1000000).toFixed(1) + "M";
   if (num >= 1000) return (num / 1000).toFixed(1) + "K";
@@ -129,8 +143,15 @@ function AnalyticsPageContent() {
   const [timeSeries, setTimeSeries] = useState<TimeSeriesData[]>([]);
   const [topVideos, setTopVideos] = useState<TopVideo[]>([]);
   const [channelMetrics, setChannelMetrics] = useState<ChannelMetrics[]>([]);
+  const [topComments, setTopComments] = useState<TopComment[]>([]);
   const [loading, setLoading] = useState(true);
+  const [collecting, setCollecting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<{ start: Date; end: Date }>({
+    start: subDays(new Date(), 29),
+    end: new Date(),
+  });
+  const [draftDateRange, setDraftDateRange] = useState<{ start: Date; end: Date }>({
     start: subDays(new Date(), 29),
     end: new Date(),
   });
@@ -149,12 +170,17 @@ function AnalyticsPageContent() {
         apiFetch<{ data: ChannelMetrics[] }>(`/api/analytics/channels?start=${start}&end=${end}`),
       ]);
 
+      const commentsRes = await apiFetch<{ data: TopComment[] }>(`/api/analytics/comments?limit=12&start=${start}&end=${end}`);
+
       setSummary(summaryRes.data);
       setTimeSeries(timeSeriesRes.data ?? []);
       setTopVideos(topVideosRes.data ?? []);
       setChannelMetrics(channelsRes.data ?? []);
+      setTopComments(commentsRes.data ?? []);
+      setErrorMessage(null);
     } catch (err) {
       console.error("Erro ao carregar analytics:", err);
+      setErrorMessage(err instanceof Error ? err.message : "Não foi possível carregar os analytics.");
     } finally {
       setLoading(false);
     }
@@ -164,8 +190,39 @@ function AnalyticsPageContent() {
     loadAnalytics();
   }, [dateRange]);
 
-  const handleDateChange = (range: { start: Date; end: Date } | undefined) => {
-    if (range) setDateRange(range);
+  const handleCollectAnalytics = async () => {
+    setCollecting(true);
+    setErrorMessage(null);
+    try {
+      const response = await apiFetch<{
+        data: { videosProcessed: number; metricsCollected: number; commentsCollected: number; errors: string[] };
+      }>("/api/analytics/collect", { method: "POST" });
+      await loadAnalytics();
+      if (response.data.errors.length > 0) {
+        setErrorMessage(response.data.errors.slice(0, 2).join(" | "));
+      }
+    } catch (err) {
+      console.error("Erro ao atualizar analytics:", err);
+      setErrorMessage(err instanceof Error ? err.message : "Não foi possível atualizar os analytics.");
+    } finally {
+      setCollecting(false);
+    }
+  };
+
+  const updateDateRange = (field: "start" | "end", value: string) => {
+    const nextDate = parseISO(value);
+    if (Number.isNaN(nextDate.getTime())) return;
+
+    setDraftDateRange((current) => {
+      if (field === "start") {
+        return { start: nextDate, end: nextDate > current.end ? nextDate : current.end };
+      }
+      return { start: nextDate < current.start ? nextDate : current.start, end: nextDate };
+    });
+  };
+
+  const applyDateRange = () => {
+    setDateRange(draftDateRange);
   };
 
   if (loading) {
@@ -225,7 +282,7 @@ function AnalyticsPageContent() {
       bgColor: "#fff7ed",
     },
     {
-      label: "Inscritos ganhos",
+      label: "Novos inscritos",
       value: formatNumber(summary.total_subscribers_gained),
       change: getChangePercent(summary.total_subscribers_gained, previousSummary.total_subscribers_gained),
       icon: Users,
@@ -259,9 +316,18 @@ function AnalyticsPageContent() {
     comments: d.comments,
     shares: d.shares,
     subscribers_gained: d.subscribers_gained,
+    engagement: d.likes + d.comments + d.shares,
+    revenue: 0,
     ctr: d.ctr,
     avg_view_duration: d.avg_view_duration,
   }));
+
+  const activeMetric = {
+    views: { key: "views", label: "Visualizações", color: "#2563eb", suffix: "" },
+    watch_time: { key: "watch_time", label: "Tempo de exibição", color: "#7c3aed", suffix: " min" },
+    engagement: { key: "engagement", label: "Engajamento", color: "#f97316", suffix: "" },
+    revenue: { key: "revenue", label: "Receita", color: "#0f766e", suffix: "" },
+  }[metricFilter];
 
   const engagementData = [
     { name: "Curtidas", value: summary.total_likes, color: "#f97316" },
@@ -279,57 +345,7 @@ function AnalyticsPageContent() {
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 15V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10" />
-            <path d="M21 3a2 2 0 0 1 2 2v14" />
-            <path d="M10 9H5a2 2 0 0 0 0 4h6" />
-            <path d="M10 14H5a2 2 0 0 1 0-4h6" />
-          </svg>
-          <span>MyMarketing</span>
-        </div>
-        <nav className="sidebar-nav" aria-label="Sistema">
-          <a href="/app">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
-            Visão geral
-          </a>
-          <a href="/app/videos">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="23 7 16 12 23 17 23 7" />
-              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-            </svg>
-            Vídeos
-          </a>
-          <a href="/app/canais">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polygon points="23 7 16 12 23 17 23 7" />
-              <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-            </svg>
-            Canais do YouTube
-          </a>
-          <a href="/app/calendario">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-              <line x1="16" y1="2" x2="16" y2="6" />
-              <line x1="8" y1="2" x2="8" y2="6" />
-              <line x1="3" y1="10" x2="21" y2="10" />
-            </svg>
-            Calendário
-          </a>
-          <a className="active" href="/app/analytics">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="20" x2="18" y2="10" />
-              <line x1="12" y1="20" x2="12" y2="4" />
-              <line x1="6" y1="20" x2="6" y2="14" />
-            </svg>
-            Analytics
-          </a>
-        </nav>
-      </aside>
+      <AppSidebar />
 
       <section className="workspace">
         <header className="workspace-header">
@@ -338,16 +354,34 @@ function AnalyticsPageContent() {
             <h1>Performance dos Vídeos</h1>
           </div>
           <div className="workspace-actions">
+            <button className="analytics-refresh" type="button" onClick={handleCollectAnalytics} disabled={collecting || loading}>
+              {collecting ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+              {collecting ? "Atualizando..." : "Atualizar dados"}
+            </button>
             <div className="date-picker-wrapper">
               <Calendar size={18} />
-              <input
-                type="text"
-                value={`${format(dateRange.start, "dd/MM/yyyy")} - ${format(dateRange.end, "dd/MM/yyyy")}`}
-                readOnly
-                onClick={() => {}}
-                placeholder="Período"
-                style={{ border: "1px solid #d1d5db", padding: "8px 12px", borderRadius: "8px", fontSize: "13px", cursor: "pointer" }}
-              />
+              <div className="date-range-fields">
+                <label>
+                  <span>De</span>
+                  <input
+                    type="date"
+                    value={format(draftDateRange.start, "yyyy-MM-dd")}
+                    onChange={(event) => updateDateRange("start", event.target.value)}
+                  />
+                </label>
+                <span className="date-range-separator">até</span>
+                <label>
+                  <span>Até</span>
+                  <input
+                    type="date"
+                    value={format(draftDateRange.end, "yyyy-MM-dd")}
+                    onChange={(event) => updateDateRange("end", event.target.value)}
+                  />
+                </label>
+                <button className="apply-date-filter" type="button" onClick={applyDateRange}>
+                  Aplicar
+                </button>
+              </div>
             </div>
             <div className="filter-select">
               <Filter size={16} />
@@ -364,6 +398,16 @@ function AnalyticsPageContent() {
             </div>
           </div>
         </header>
+
+        {errorMessage && (
+          <div className="analytics-alert" role="alert">
+            <Activity size={18} />
+            <span>{errorMessage}</span>
+            <button type="button" onClick={() => loadAnalytics()} aria-label="Tentar novamente">
+              Tentar novamente
+            </button>
+          </div>
+        )}
 
         {/* Cards de métricas */}
         <section className="metric-grid">
@@ -404,23 +448,19 @@ function AnalyticsPageContent() {
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Tendência</p>
-                <h2>Visualizações e Tempo de Exibição</h2>
+                <h2>{activeMetric.label} por dia</h2>
               </div>
             </div>
             <div className="chart-box" style={{ height: "320px" }}>
               {loading ? (
                 <div className="chart-placeholder" />
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <AreaChart data={chartData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}>
                     <defs>
-                      <linearGradient id="views" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#2563eb" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#2563eb" stopOpacity={0} />
-                      </linearGradient>
-                      <linearGradient id="watchTime" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#7c3aed" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#7c3aed" stopOpacity={0} />
+                      <linearGradient id="activeMetric" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="5%" stopColor={activeMetric.color} stopOpacity={0.3} />
+                        <stop offset="95%" stopColor={activeMetric.color} stopOpacity={0} />
                       </linearGradient>
                     </defs>
                     <CartesianGrid stroke="#e5e7eb" vertical={false} />
@@ -428,24 +468,17 @@ function AnalyticsPageContent() {
                     <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11 }} tickFormatter={formatNumber} />
                     <Tooltip
                       formatter={(value: any, name: any) => [
-                        name === "views" ? formatNumber(Number(value) ?? 0) : formatNumber(Number(value) ?? 0) + " min",
-                        name === "views" ? "Visualizações" : "Tempo de exibição",
+                        `${formatNumber(Number(value) || 0)}${activeMetric.suffix}`,
+                        name === activeMetric.key ? activeMetric.label : name,
                       ]}
                       labelFormatter={(date) => date}
                     />
                     <Area
                       type="monotone"
-                      dataKey="views"
-                      stroke="#2563eb"
+                      dataKey={activeMetric.key}
+                      stroke={activeMetric.color}
                       strokeWidth={2}
-                      fill="url(#views)"
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="watch_time"
-                      stroke="#7c3aed"
-                      strokeWidth={2}
-                      fill="url(#watchTime)"
+                      fill="url(#activeMetric)"
                     />
                   </AreaChart>
                 </ResponsiveContainer>
@@ -465,7 +498,7 @@ function AnalyticsPageContent() {
               {loading ? (
                 <div className="chart-placeholder" />
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <LineChart data={chartData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}>
                     <CartesianGrid stroke="#e5e7eb" vertical={false} />
                     <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 11 }} />
@@ -530,7 +563,7 @@ function AnalyticsPageContent() {
               {loading ? (
                 <div className="chart-placeholder" />
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <PieChart>
                     <Pie
                       data={engagementData}
@@ -570,7 +603,7 @@ function AnalyticsPageContent() {
               {loading ? (
                 <div className="chart-placeholder" />
               ) : topVideos.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <BarChart
                     data={topVideos.slice(0, 8).reverse()}
                     layout="vertical"
@@ -616,12 +649,17 @@ function AnalyticsPageContent() {
               {loading ? (
                 <div className="chart-placeholder" />
               ) : channelData.length > 0 ? (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <BarChart data={channelData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}>
                     <CartesianGrid stroke="#e5e7eb" vertical={false} />
                     <XAxis dataKey="name" axisLine={false} tickLine={false} tick={{ fontSize: 11 }} />
                     <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 11 }} tickFormatter={formatNumber} />
-                    <Tooltip formatter={(value: any) => [formatNumber(Number(value)), "Visualizações"]} />
+                    <Tooltip
+                      formatter={(value: any, name: any) => [
+                        formatNumber(Number(value)),
+                        name === "subscribers" ? "Inscritos" : "Visualizações",
+                      ]}
+                    />
                     <Legend />
                     <Bar dataKey="views" fill="#2563eb" name="Visualizações" radius={[6, 6, 0, 0]} />
                     <Bar dataKey="subscribers" fill="#0f766e" name="Inscritos" radius={[6, 6, 0, 0]} />
@@ -647,7 +685,7 @@ function AnalyticsPageContent() {
               {loading ? (
                 <div className="chart-placeholder" />
               ) : (
-                <ResponsiveContainer width="100%" height="100%">
+                <ResponsiveContainer width="100%" height={320} minWidth={1} minHeight={240}>
                   <BarChart data={chartData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}>
                     <CartesianGrid stroke="#e5e7eb" vertical={false} />
                     <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 11 }} />
@@ -724,6 +762,44 @@ function AnalyticsPageContent() {
           </div>
         </section>
 
+        <section className="panel comments-panel">
+          <div className="panel-heading">
+            <div>
+              <p className="eyebrow">Comunidade</p>
+              <h2>Comentários principais</h2>
+            </div>
+            <span className="panel-caption">Ordenados por curtidas</span>
+          </div>
+          <div className="comments-grid">
+            {topComments.length > 0 ? (
+              topComments.map((comment) => (
+                <article className="comment-card" key={comment.id}>
+                  <div className="comment-card-header">
+                    {comment.author_avatar_url ? (
+                      <img src={comment.author_avatar_url} alt="" />
+                    ) : (
+                      <span className="comment-avatar">{comment.author_name.slice(0, 1).toUpperCase()}</span>
+                    )}
+                    <div>
+                      <strong>{comment.author_name}</strong>
+                      <small>{format(new Date(comment.published_at), "dd/MM/yyyy", { locale: ptBR })}</small>
+                    </div>
+                    <span className="comment-likes"><ThumbsUp size={14} /> {formatNumber(comment.like_count)}</span>
+                  </div>
+                  <p>{comment.text}</p>
+                  <span className="comment-video">{comment.video_title}</span>
+                </article>
+              ))
+            ) : (
+              <div className="comments-empty">
+                <MessageSquare size={24} />
+                <p>Nenhum comentário coletado ainda.</p>
+                <small>Use “Atualizar dados” para buscar comentários dos vídeos publicados.</small>
+              </div>
+            )}
+          </div>
+        </section>
+
         <style jsx>{`
           .app-shell {
             display: grid;
@@ -771,6 +847,8 @@ function AnalyticsPageContent() {
             color: #0f766e;
           }
           .workspace {
+            width: 100%;
+            min-width: 0;
             padding: 32px;
             overflow-y: auto;
           }
@@ -799,12 +877,101 @@ function AnalyticsPageContent() {
             display: flex;
             align-items: center;
             gap: 12px;
+            flex-wrap: wrap;
+          }
+          .analytics-refresh {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            min-height: 40px;
+            padding: 0 14px;
+            color: #fff;
+            border: 1px solid #0f766e;
+            border-radius: 8px;
+            background: #0f766e;
+            font-size: 13px;
+            font-weight: 700;
+            transition: background 0.15s ease, transform 0.15s ease;
+          }
+          .analytics-refresh:hover:not(:disabled) {
+            background: #115e59;
+            transform: translateY(-1px);
+          }
+          .analytics-refresh:disabled {
+            cursor: wait;
+            opacity: 0.65;
+          }
+          .analytics-alert {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin: -12px 0 24px;
+            padding: 12px 14px;
+            color: #9f1239;
+            border: 1px solid #fecdd3;
+            border-radius: 8px;
+            background: #fff1f2;
+            font-size: 13px;
+          }
+          .analytics-alert button {
+            margin-left: auto;
+            padding: 0;
+            color: #9f1239;
+            border: 0;
+            background: transparent;
+            font-weight: 700;
+            text-decoration: underline;
           }
           .date-picker-wrapper {
             display: flex;
             align-items: center;
             gap: 8px;
             color: #6b7280;
+          }
+          .date-range-fields {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          .date-range-fields label {
+            display: grid;
+            gap: 3px;
+          }
+          .date-range-fields label span {
+            color: #64748b;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+          }
+          .date-range-fields input {
+            width: 140px;
+            min-height: 38px;
+            padding: 0 8px;
+            color: #1f2937;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: #fff;
+            font-size: 12px;
+          }
+          .date-range-separator {
+            align-self: end;
+            padding-bottom: 10px;
+            color: #94a3b8;
+            font-size: 12px;
+          }
+          .apply-date-filter {
+            align-self: end;
+            min-height: 38px;
+            padding: 0 12px;
+            color: #0f766e;
+            border: 1px solid #99d8ce;
+            border-radius: 8px;
+            background: #ecfdf5;
+            font-size: 12px;
+            font-weight: 700;
+          }
+          .apply-date-filter:hover {
+            background: #d8f3ed;
           }
           .filter-select {
             display: flex;
@@ -813,6 +980,7 @@ function AnalyticsPageContent() {
             color: #6b7280;
           }
           .panel {
+            width: 100%;
             background: #fff;
             border: 1px solid #e5e7eb;
             border-radius: 12px;
@@ -834,6 +1002,8 @@ function AnalyticsPageContent() {
             padding: 24px;
           }
           .chart-panel {
+            width: 100%;
+            min-width: 0;
             height: 100%;
           }
           .wide-panel {
@@ -841,6 +1011,8 @@ function AnalyticsPageContent() {
           }
           .chart-box {
             width: 100%;
+            min-width: 0;
+            min-height: 320px;
           }
           .chart-placeholder {
             height: 100%;
@@ -850,22 +1022,29 @@ function AnalyticsPageContent() {
             color: #d1d5db;
           }
           .metric-grid {
+            width: 100%;
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 16px;
             margin-bottom: 24px;
           }
           .metric-card {
+            width: 100%;
             background: #fff;
             border: 1px solid #e5e7eb;
             border-radius: 12px;
             padding: 20px;
           }
           .dashboard-grid {
+            width: 100%;
+            min-width: 0;
             display: grid;
             grid-template-columns: repeat(2, 1fr);
             gap: 24px;
             margin-bottom: 24px;
+          }
+          .dashboard-grid > .panel {
+            min-width: 0;
           }
           @media (max-width: 1024px) {
             .dashboard-grid {
@@ -876,6 +1055,7 @@ function AnalyticsPageContent() {
             }
           }
           .videos-table-container {
+            width: 100%;
             overflow-x: auto;
           }
           .videos-table {
@@ -902,6 +1082,112 @@ function AnalyticsPageContent() {
           .videos-table tr:last-child td {
             border-bottom: none;
           }
+          .comments-panel {
+            overflow: hidden;
+          }
+          .panel-caption {
+            color: #94a3b8;
+            font-size: 12px;
+          }
+          .comments-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            padding: 20px 24px 24px;
+          }
+          .comment-card {
+            min-width: 0;
+            padding: 16px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #fbfdfd;
+          }
+          .comment-card-header {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+          }
+          .comment-card-header img,
+          .comment-avatar {
+            width: 32px;
+            height: 32px;
+            flex: 0 0 32px;
+            border-radius: 50%;
+          }
+          .comment-card-header img {
+            object-fit: cover;
+          }
+          .comment-avatar {
+            display: grid;
+            place-items: center;
+            color: #0f766e;
+            background: #d8f3ed;
+            font-size: 13px;
+            font-weight: 800;
+          }
+          .comment-card-header strong,
+          .comment-card-header small {
+            display: block;
+          }
+          .comment-card-header strong {
+            overflow: hidden;
+            max-width: 130px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            color: #1f2937;
+            font-size: 13px;
+          }
+          .comment-card-header small {
+            margin-top: 2px;
+            color: #94a3b8;
+            font-size: 11px;
+          }
+          .comment-likes {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            margin-left: auto;
+            color: #64748b;
+            font-size: 12px;
+            font-weight: 700;
+          }
+          .comment-card p {
+            display: -webkit-box;
+            overflow: hidden;
+            min-height: 56px;
+            margin: 14px 0 12px;
+            color: #374151;
+            font-size: 13px;
+            line-height: 1.5;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
+          }
+          .comment-video {
+            display: block;
+            overflow: hidden;
+            color: #0f766e;
+            font-size: 11px;
+            font-weight: 700;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+          }
+          .comments-empty {
+            display: grid;
+            place-items: center;
+            gap: 8px;
+            grid-column: 1 / -1;
+            padding: 28px;
+            color: #94a3b8;
+            text-align: center;
+          }
+          .comments-empty p,
+          .comments-empty small {
+            margin: 0;
+          }
+          .comments-empty p {
+            color: #4b5563;
+            font-weight: 700;
+          }
           .loading-state {
             display: flex;
             flex-direction: column;
@@ -920,6 +1206,19 @@ function AnalyticsPageContent() {
           }
           .empty-state svg { margin-bottom: 16px; color: #d1d5db; }
           .empty-state h3 { font-size: 18px; font-weight: 600; color: #111827; margin-bottom: 8px; }
+          @media (max-width: 900px) {
+            .comments-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+          }
+          @media (max-width: 620px) {
+            .comments-grid { grid-template-columns: 1fr; padding: 16px; }
+            .analytics-refresh { width: 100%; justify-content: center; }
+            .workspace { padding: 20px 14px; }
+            .workspace-actions { align-items: stretch; flex-direction: column; width: 100%; }
+            .date-picker-wrapper { align-items: flex-start; }
+            .date-range-fields { width: 100%; }
+            .date-range-fields label { flex: 1; }
+            .date-range-fields input { width: 100%; }
+          }
         `}</style>
       </section>
     </main>

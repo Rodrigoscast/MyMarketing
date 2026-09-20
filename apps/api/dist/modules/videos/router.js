@@ -361,8 +361,7 @@ router.post("/:id/publish-now", async (req, res) => {
             description: video.description,
             tags: video.tags,
             categoryId: video.category_id,
-            privacyStatus: video.privacy_status,
-            publishAt: video.publish_at,
+            privacyStatus: "public",
             madeForKids: video.made_for_kids,
             license: video.license,
             language: video.language,
@@ -384,6 +383,7 @@ router.post("/:id/publish-now", async (req, res) => {
             .from("youtube_videos")
             .update({
             status: "published",
+            publish_at: null,
             youtube_video_id: result.youtubeVideoId,
             published_at: result.publishedAt ?? new Date().toISOString(),
             youtube_error: null,
@@ -707,8 +707,7 @@ router.post("/bulk", async (req, res) => {
                             description: video.description,
                             tags: video.tags,
                             categoryId: video.category_id,
-                            privacyStatus: video.privacy_status,
-                            publishAt: video.publish_at,
+                            privacyStatus: "public",
                             madeForKids: video.made_for_kids,
                             license: video.license,
                             language: video.language,
@@ -729,6 +728,7 @@ router.post("/bulk", async (req, res) => {
                             .from("youtube_videos")
                             .update({
                             status: "published",
+                            publish_at: null,
                             youtube_video_id: result.youtubeVideoId,
                             published_at: result.publishedAt ?? new Date().toISOString(),
                             youtube_error: null,

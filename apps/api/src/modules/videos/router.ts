@@ -391,8 +391,7 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
       description: video.description,
       tags: video.tags,
       categoryId: video.category_id,
-      privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
-      publishAt: video.publish_at,
+      privacyStatus: "public" as const,
       madeForKids: video.made_for_kids,
       license: video.license as "youtube" | "creativeCommon",
       language: video.language,
@@ -417,6 +416,7 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
       .from("youtube_videos")
       .update({
         status: "published",
+        publish_at: null,
         youtube_video_id: result.youtubeVideoId,
         published_at: result.publishedAt ?? new Date().toISOString(),
         youtube_error: null,
@@ -776,8 +776,7 @@ router.post("/bulk", async (req: AuthenticatedRequest, res: Response) => {
               description: video.description,
               tags: video.tags,
               categoryId: video.category_id,
-              privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
-              publishAt: video.publish_at,
+              privacyStatus: "public" as const,
               madeForKids: video.made_for_kids,
               license: video.license as "youtube" | "creativeCommon",
               language: video.language,
@@ -801,6 +800,7 @@ router.post("/bulk", async (req: AuthenticatedRequest, res: Response) => {
               .from("youtube_videos")
               .update({
                 status: "published",
+                publish_at: null,
                 youtube_video_id: result.youtubeVideoId,
                 published_at: result.publishedAt ?? new Date().toISOString(),
                 youtube_error: null,

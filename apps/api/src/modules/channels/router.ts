@@ -9,6 +9,7 @@ import {
   exchangeCodeForTokens,
   getChannelInfo,
   saveConnectedChannel,
+  syncYouTubeChannelVideos,
 } from "./youtube.js";
 
 const router = Router();
@@ -157,6 +158,7 @@ router.post("/:id/test", async (req: AuthenticatedRequest, res: Response) => {
 
     const accessToken = await refreshAccessToken(account.token_reference);
     const channelInfo = await getChannelInfo(accessToken);
+    const sync = await syncYouTubeChannelVideos(req.organizationId!, req.params.id);
 
     res.json({
       data: {
@@ -164,14 +166,17 @@ router.post("/:id/test", async (req: AuthenticatedRequest, res: Response) => {
         channelId: channelInfo.channelId,
         title: channelInfo.title,
         accountName: account.account_name,
+        sync,
       },
     });
   } catch (err) {
-    // Token expirado ou revogado
-    await supabase
-      .from("social_accounts")
-      .update({ status: "expired" })
-      .eq("id", req.params.id);
+    // Apenas invalid_grant indica que o canal realmente expirou.
+    if (err instanceof AppError && err.code === "YOUTUBE_TOKEN_EXPIRED") {
+      await supabase
+        .from("social_accounts")
+        .update({ status: "expired" })
+        .eq("id", req.params.id);
+    }
 
     res.status(400).json({
       data: {

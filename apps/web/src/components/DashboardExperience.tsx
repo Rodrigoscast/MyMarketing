@@ -1,323 +1,380 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Area,
-  AreaChart,
-  Bar,
-  BarChart,
-  CartesianGrid,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis
-} from "recharts";
-import {
-  Bell,
+  AlertCircle,
+  BarChart3,
   CalendarClock,
-  Check,
+  CheckCircle,
+  Clock,
   FileVideo,
-  Gauge,
-  LogOut,
-  Megaphone,
+  Loader2,
   Plus,
-  Save,
-  Search,
-  Settings,
-  Sparkles,
+  RefreshCw,
   Upload,
-  Video
+  Video,
 } from "lucide-react";
-import { Logo } from "@/components/Logo";
-import { QuotaWidget, QuotaBadge } from "@/components/QuotaWidget";
-import { clearSession } from "@/lib/auth";
+import { AppSidebar } from "@/components/AppSidebar";
+import { QuotaWidget } from "@/components/QuotaWidget";
+import { apiFetch } from "@/lib/api";
 
-const revenueData = [
-  { day: "Seg", receita: 32000, investimento: 8400 },
-  { day: "Ter", receita: 41000, investimento: 9300 },
-  { day: "Qua", receita: 38000, investimento: 8700 },
-  { day: "Qui", receita: 52000, investimento: 10400 },
-  { day: "Sex", receita: 61000, investimento: 12100 },
-  { day: "Sab", receita: 58000, investimento: 11800 },
-  { day: "Dom", receita: 74000, investimento: 13200 }
-];
+type VideoStatus = "draft" | "scheduled" | "publishing" | "published" | "failed" | "cancelled";
 
-const channelData = [
-  { name: "Google", cliques: 18400, views: 76000 },
-  { name: "Meta", cliques: 14100, views: 68000 },
-  { name: "LinkedIn", cliques: 6200, views: 28000 },
-  { name: "TikTok", cliques: 9900, views: 91000 }
-];
+interface YouTubeChannel {
+  id: string;
+  account_name: string;
+  provider_account_id: string;
+  status: string;
+}
+
+interface VideoItem {
+  id: string;
+  title: string;
+  status: VideoStatus;
+  publish_at: string | null;
+  privacy_status: "private" | "unlisted" | "public";
+  youtube_error: string | null;
+  social_accounts?: YouTubeChannel | YouTubeChannel[] | null;
+}
+
+interface AnalyticsSummary {
+  total_views: number;
+  total_watch_time: number;
+  total_likes: number;
+  total_comments: number;
+  total_shares: number;
+  total_subscribers_gained: number;
+  videos_published: number;
+}
+
+const statusLabel: Record<VideoStatus, string> = {
+  draft: "Rascunho",
+  scheduled: "Agendado",
+  publishing: "Publicando",
+  published: "Publicado",
+  failed: "Falhou",
+  cancelled: "Cancelado",
+};
+
+function todayIsoDate() {
+  const now = new Date();
+  const offsetMs = now.getTimezoneOffset() * 60 * 1000;
+  return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+function formatNumber(value: number | null | undefined) {
+  if (value === null || value === undefined) return "-";
+  return new Intl.NumberFormat("pt-BR", { notation: value >= 10000 ? "compact" : "standard" }).format(value);
+}
+
+function formatDateTime(value: string | null) {
+  if (!value) return "Sem data";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Data invalida";
+  return new Intl.DateTimeFormat("pt-BR", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function isSameLocalDay(value: string | null, day = todayIsoDate()) {
+  if (!value) return false;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return false;
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 10) === day;
+}
+
+function getChannelName(value: VideoItem["social_accounts"]) {
+  if (!value) return undefined;
+  if (Array.isArray(value)) return value[0]?.account_name;
+  return value.account_name;
+}
 
 export function DashboardExperience() {
-  const router = useRouter();
-  const [chartsReady, setChartsReady] = useState(false);
+  const [videos, setVideos] = useState<VideoItem[]>([]);
+  const [channels, setChannels] = useState<YouTubeChannel[]>([]);
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [errors, setErrors] = useState<string[]>([]);
 
-  useEffect(() => {
-    setChartsReady(true);
+  const loadDashboard = useCallback(async () => {
+    setRefreshing(true);
+    const today = todayIsoDate();
+
+    const [videosResult, channelsResult, analyticsResult] = await Promise.allSettled([
+      apiFetch<{ data: VideoItem[] }>("/api/videos"),
+      apiFetch<{ data: YouTubeChannel[] }>("/api/channels"),
+      apiFetch<{ data: AnalyticsSummary }>(`/api/analytics/summary?start=${today}&end=${today}`),
+    ]);
+
+    const nextErrors: string[] = [];
+
+    if (videosResult.status === "fulfilled") {
+      setVideos(videosResult.value.data ?? []);
+    } else {
+      nextErrors.push("Nao foi possivel carregar os videos.");
+    }
+
+    if (channelsResult.status === "fulfilled") {
+      setChannels(channelsResult.value.data ?? []);
+    } else {
+      nextErrors.push("Nao foi possivel carregar os canais.");
+    }
+
+    if (analyticsResult.status === "fulfilled") {
+      setAnalytics(analyticsResult.value.data);
+    } else {
+      nextErrors.push("Analytics de hoje indisponivel no momento.");
+      setAnalytics(null);
+    }
+
+    setErrors(nextErrors);
+    setLoading(false);
+    setRefreshing(false);
   }, []);
 
-  const handleLogout = () => {
-    clearSession();
-    router.push("/login");
-  };
+  useEffect(() => {
+    loadDashboard();
+  }, [loadDashboard]);
+
+  const today = todayIsoDate();
+  const now = useMemo(() => new Date(), []);
+
+  const scheduledToday = videos.filter(
+    (video) => ["scheduled", "publishing"].includes(video.status) && isSameLocalDay(video.publish_at, today)
+  ).length;
+  const publishedToday = videos.filter((video) => video.status === "published" && isSameLocalDay(video.publish_at, today)).length;
+  const connectedChannels = channels.filter((channel) => channel.status === "connected").length;
+  const engagementToday = analytics ? analytics.total_likes + analytics.total_comments + analytics.total_shares : null;
+
+  const upcomingVideos = videos
+    .filter((video) => video.publish_at && ["scheduled", "publishing"].includes(video.status))
+    .filter((video) => new Date(video.publish_at!).getTime() >= now.getTime())
+    .sort((a, b) => new Date(a.publish_at!).getTime() - new Date(b.publish_at!).getTime())
+    .slice(0, 5);
+
+  const pendingVideos = videos
+    .filter((video) => ["draft", "failed"].includes(video.status))
+    .sort((a, b) => a.title.localeCompare(b.title))
+    .slice(0, 5);
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <Logo />
-        <nav className="sidebar-nav" aria-label="Sistema">
-          <a href="/app">
-            <Gauge size={18} />
-            Visão geral
-          </a>
-          <a href="/app/videos">
-            <FileVideo size={18} />
-            Vídeos
-          </a>
-          <a href="/app/canais">
-            <Video size={18} />
-            Canais do YouTube
-          </a>
-          <a href="/app/calendario">
-            <CalendarClock size={18} />
-            Calendário
-          </a>
-          <a href="/app/analytics">
-            <Megaphone size={18} />
-            Analytics
-          </a>
-          <a href="/app/config">
-            <Settings size={18} />
-            Configurações
-          </a>
-        </nav>
-      </aside>
+      <AppSidebar />
 
       <section className="workspace">
         <header className="workspace-header">
           <div>
-            <p className="eyebrow">Painel MyMarketing</p>
-            <h1>Centro de crescimento</h1>
+            <p className="eyebrow">Painel geral</p>
+            <h1>Resumo de hoje</h1>
           </div>
           <div className="workspace-actions">
-            <label className="search-box">
-              <Search size={18} />
-              <input placeholder="Buscar campanhas" />
-            </label>
-            <button className="icon-button" aria-label="Notificacoes">
-              <Bell size={19} />
+            <button className="secondary-button compact-button" type="button" onClick={loadDashboard} disabled={refreshing}>
+              {refreshing ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+              Atualizar
             </button>
-            <button className="icon-button" onClick={handleLogout} aria-label="Sair da conta" title="Sair">
-              <LogOut size={19} />
-            </button>
+            <a className="primary-button compact-button" href="/app/videos">
+              <Plus size={16} />
+              Adicionar video
+            </a>
           </div>
         </header>
 
+        {errors.length > 0 && (
+          <div className="dashboard-alert" role="alert">
+            <AlertCircle size={18} />
+            <span>{errors.join(" ")}</span>
+          </div>
+        )}
+
         <section className="metric-grid" id="visao">
           <article className="metric-card">
-            <span>Receita atribuida</span>
-            <strong>R$ 184.200</strong>
-            <small>+21% vs. periodo anterior</small>
+            <span>Visualizacoes hoje</span>
+            <strong>{loading ? "..." : formatNumber(analytics?.total_views)}</strong>
+            <small>{analytics ? "Dados do YouTube Analytics" : "Sem dados coletados hoje"}</small>
           </article>
           <article className="metric-card">
-            <span>Cliques</span>
-            <strong>48.600</strong>
-            <small>CTR medio de 3,9%</small>
+            <span>Engajamento hoje</span>
+            <strong>{loading ? "..." : formatNumber(engagementToday)}</strong>
+            <small>Curtidas, comentarios e compartilhamentos</small>
           </article>
           <article className="metric-card">
-            <span>Views</span>
-            <strong>263.000</strong>
-            <small>Videos e anuncios conectados</small>
+            <span>Agendados hoje</span>
+            <strong>{loading ? "..." : scheduledToday}</strong>
+            <small>{publishedToday} publicados hoje</small>
           </article>
           <article className="metric-card">
-            <span>ROI</span>
-            <strong>4.8x</strong>
-            <small>Google Ads e Meta Ads</small>
-          </article>
-          <article className="metric-card">
-            <QuotaBadge />
+            <span>Canais conectados</span>
+            <strong>{loading ? "..." : connectedChannels}</strong>
+            <small>{channels.length} canais cadastrados</small>
           </article>
         </section>
 
         <section className="dashboard-grid">
-          <article className="panel composer-panel" id="agenda">
+          <article className="panel">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Publicação YouTube</p>
-                <h2>Criar novo vídeo</h2>
+                <p className="eyebrow">Acoes rapidas</p>
+                <h2>Operacao de conteudo</h2>
               </div>
-              <a href="/app/videos" className="primary-button compact-button">
-                <Plus size={17} />
-                Novo vídeo
+            </div>
+            <div className="dashboard-actions-grid">
+              <a className="dashboard-action" href="/app/videos">
+                <Upload size={18} />
+                <span>
+                  <strong>Adicionar video</strong>
+                  <small>Upload, metadados e agendamento</small>
+                </span>
+              </a>
+              <a className="dashboard-action" href="/app/calendario">
+                <CalendarClock size={18} />
+                <span>
+                  <strong>Ver calendario</strong>
+                  <small>Planejar proximas publicacoes</small>
+                </span>
+              </a>
+              <a className="dashboard-action" href="/app/analytics">
+                <BarChart3 size={18} />
+                <span>
+                  <strong>Abrir analytics</strong>
+                  <small>Analisar videos e comentarios</small>
+                </span>
+              </a>
+              <a className="dashboard-action" href="/app/canais">
+                <Video size={18} />
+                <span>
+                  <strong>Gerenciar canais</strong>
+                  <small>Conectar ou testar YouTube</small>
+                </span>
               </a>
             </div>
-
-            <div className="upload-zone">
-              <FileVideo size={28} />
-              <div>
-                <b>Envie seu arquivo de vídeo</b>
-                <span>MP4, MOV, AVI, MKV, WebM — até 2GB</span>
-              </div>
-              <a href="/app/videos" className="icon-button" aria-label="Criar vídeo">
-                <Upload size={19} />
-              </a>
-            </div>
-
-            <p style={{ color: "#6b7280", fontSize: "14px", marginTop: "8px" }}>
-              Gerencie uploads, metadados completos (título, descrição, tags, thumbnail, playlist, agendamento nativo)
-              e acompanhe o engajamento no <a href="/app/analytics" style={{ color: "#0f766e" }}>Analytics</a>.
-            </p>
           </article>
 
-          <article className="panel calendar-panel">
+          <article className="panel">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Agenda de publicação</p>
-                <h2>Próximos vídeos</h2>
+                <p className="eyebrow">Hoje</p>
+                <h2>Saude da conta</h2>
               </div>
-              <CalendarClock size={22} />
+              <CheckCircle size={22} />
             </div>
-            <div className="post-list">
-              <div className="post-item empty">
-                <p>Nenhum vídeo agendado ainda.</p>
-                <a href="/app/videos" className="primary-button compact-button" style={{ marginTop: "8px" }}>
-                  <Plus size={15} />
-                  Criar primeiro vídeo
-                </a>
+            <div className="dashboard-status-list">
+              <div>
+                <span>Canais prontos</span>
+                <strong>{connectedChannels}/{channels.length}</strong>
+              </div>
+              <div>
+                <span>Videos em rascunho ou falha</span>
+                <strong>{videos.filter((video) => ["draft", "failed"].includes(video.status)).length}</strong>
+              </div>
+              <div>
+                <span>Tempo assistido hoje</span>
+                <strong>{analytics ? `${formatNumber(analytics.total_watch_time)} min` : "-"}</strong>
               </div>
             </div>
           </article>
         </section>
 
-        <section className="dashboard-grid analytics-grid" id="anuncios">
-          <article className="panel chart-panel wide-panel">
+        <section className="dashboard-grid">
+          <article className="panel">
             <div className="panel-heading">
               <div>
-                <p className="eyebrow">Performance paga</p>
-                <h2>Receita x investimento</h2>
+                <p className="eyebrow">Agenda</p>
+                <h2>Proximas publicacoes</h2>
               </div>
-              <button className="secondary-button compact-button">
-                <Sparkles size={17} />
-                Otimizar
-              </button>
+              <a className="secondary-button compact-button" href="/app/calendario">
+                Ver agenda
+              </a>
             </div>
-            <div className="chart-box">
-              {chartsReady ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <AreaChart data={revenueData} margin={{ left: 0, right: 8, top: 10, bottom: 0 }}>
-                    <defs>
-                      <linearGradient id="receita" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#0f766e" stopOpacity={0.32} />
-                        <stop offset="95%" stopColor="#0f766e" stopOpacity={0} />
-                      </linearGradient>
-                    </defs>
-                    <CartesianGrid stroke="#e5e7eb" vertical={false} />
-                    <XAxis dataKey="day" axisLine={false} tickLine={false} />
-                    <YAxis axisLine={false} tickLine={false} />
-                    <Tooltip />
-                    <Area
-                      type="monotone"
-                      dataKey="receita"
-                      stroke="#0f766e"
-                      strokeWidth={3}
-                      fill="url(#receita)"
-                    />
-                    <Area
-                      type="monotone"
-                      dataKey="investimento"
-                      stroke="#f97316"
-                      strokeWidth={3}
-                      fill="transparent"
-                    />
-                  </AreaChart>
-                </ResponsiveContainer>
+            <div className="dashboard-list">
+              {loading ? (
+                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando agenda...</div>
+              ) : upcomingVideos.length > 0 ? (
+                upcomingVideos.map((video) => (
+                  <a className="dashboard-list-item" href={`/app/videos?edit=${video.id}`} key={video.id}>
+                    <Clock size={17} />
+                    <span>
+                      <strong>{video.title}</strong>
+                      <small>{formatDateTime(video.publish_at)}{getChannelName(video.social_accounts) ? ` - ${getChannelName(video.social_accounts)}` : ""}</small>
+                    </span>
+                    <em>{statusLabel[video.status]}</em>
+                  </a>
+                ))
               ) : (
-                <div className="chart-placeholder" />
+                <div className="dashboard-empty">
+                  <CalendarClock size={20} />
+                  Nenhum video agendado.
+                  <a href="/app/videos">Adicionar video</a>
+                </div>
               )}
             </div>
           </article>
 
-          <article className="panel chart-panel">
+          <article className="panel">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">Pendencias</p>
+                <h2>Videos para revisar</h2>
+              </div>
+            </div>
+            <div className="dashboard-list">
+              {loading ? (
+                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando videos...</div>
+              ) : pendingVideos.length > 0 ? (
+                pendingVideos.map((video) => (
+                  <a className="dashboard-list-item" href={`/app/videos?edit=${video.id}`} key={video.id}>
+                    <FileVideo size={17} />
+                    <span>
+                      <strong>{video.title}</strong>
+                      <small>{video.youtube_error || "Pronto para completar metadados e agendar"}</small>
+                    </span>
+                    <em>{statusLabel[video.status]}</em>
+                  </a>
+                ))
+              ) : (
+                <div className="dashboard-empty">
+                  <CheckCircle size={20} />
+                  Nenhum rascunho ou falha pendente.
+                </div>
+              )}
+            </div>
+          </article>
+        </section>
+
+        <section className="settings-grid">
+          <QuotaWidget />
+
+          <article className="panel">
             <div className="panel-heading">
               <div>
                 <p className="eyebrow">Canais</p>
-                <h2>Views e cliques</h2>
-              </div>
-            </div>
-            <div className="chart-box small-chart">
-              {chartsReady ? (
-                <ResponsiveContainer width="100%" height="100%">
-                  <BarChart data={channelData} margin={{ left: 0, right: 8, top: 8, bottom: 0 }}>
-                    <CartesianGrid stroke="#e5e7eb" vertical={false} />
-                    <XAxis dataKey="name" axisLine={false} tickLine={false} />
-                    <YAxis axisLine={false} tickLine={false} />
-                    <Tooltip />
-                    <Bar dataKey="views" fill="#2563eb" radius={[6, 6, 0, 0]} />
-                    <Bar dataKey="cliques" fill="#f97316" radius={[6, 6, 0, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              ) : (
-                <div className="chart-placeholder compact" />
-              )}
-            </div>
-          </article>
-        </section>
-
-        <section className="settings-grid" id="config">
-          <article className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Configuracoes gerais</p>
-                <h2>Marca e operacao</h2>
-              </div>
-              <button className="icon-button" aria-label="Salvar configuracoes">
-                <Save size={19} />
-              </button>
-            </div>
-            <div className="settings-form">
-              <label className="field">
-                Nome da empresa
-                <input defaultValue="Meraki Inc" />
-              </label>
-              <label className="field">
-                Timezone
-                <select defaultValue="America/Sao_Paulo">
-                  <option value="America/Sao_Paulo">America/Sao_Paulo</option>
-                  <option value="America/New_York">America/New_York</option>
-                  <option value="Europe/Lisbon">Europe/Lisbon</option>
-                </select>
-              </label>
-              <label className="field">
-                Tom de voz
-                <select defaultValue="elegante">
-                  <option value="elegante">Elegante e direto</option>
-                  <option value="consultivo">Consultivo</option>
-                  <option value="ousado">Ousado</option>
-                </select>
-              </label>
-              <label className="toggle-row">
-                <input type="checkbox" defaultChecked />
-                Exigir aprovacao antes de publicar
-              </label>
-            </div>
-          </article>
-
-          <article className="panel">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">Integracoes</p>
                 <h2>Contas conectadas</h2>
               </div>
+              <a className="secondary-button compact-button" href="/app/canais">
+                Gerenciar
+              </a>
             </div>
             <div className="integration-list">
-              {["Google Ads", "Meta Ads", "LinkedIn", "TikTok", "Instagram"].map((name, index) => (
-                <div className="integration-item" key={name}>
-                  <span>{name}</span>
-                  <b>{index < 2 ? "Conectado" : "Pendente"}</b>
+              {loading ? (
+                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando canais...</div>
+              ) : channels.length > 0 ? (
+                channels.map((channel) => (
+                  <div className="integration-item" key={channel.id}>
+                    <span>{channel.account_name}</span>
+                    <b>{channel.status}</b>
+                  </div>
+                ))
+              ) : (
+                <div className="dashboard-empty">
+                  <Video size={20} />
+                  Nenhum canal conectado.
+                  <a href="/app/canais">Conectar YouTube</a>
                 </div>
-              ))}
+              )}
             </div>
           </article>
         </section>

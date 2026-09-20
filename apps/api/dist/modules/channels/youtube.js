@@ -74,11 +74,25 @@ export async function refreshAccessToken(encryptedRefreshToken) {
     const refreshToken = decrypt(encryptedRefreshToken);
     const oauth2Client = createOAuth2Client();
     oauth2Client.setCredentials({ refresh_token: refreshToken });
-    const { credentials } = await oauth2Client.refreshAccessToken();
+    let credentials;
+    try {
+        ({ credentials } = await oauth2Client.refreshAccessToken());
+    }
+    catch (err) {
+        if (isInvalidGrantError(err)) {
+            throw new AppError("A conexão com o YouTube expirou ou foi revogada. Reconecte o canal em Canais.", 401, "YOUTUBE_TOKEN_EXPIRED");
+        }
+        throw err;
+    }
     if (!credentials.access_token) {
         throw new AppError("Falha ao renovar access token", 500, "TOKEN_REFRESH_FAILED");
     }
     return credentials.access_token;
+}
+function isInvalidGrantError(error) {
+    const maybeError = error;
+    return (maybeError.message === "invalid_grant" ||
+        maybeError.response?.data?.error === "invalid_grant");
 }
 /**
  * Cria cliente YouTube autenticado para um canal da organização
@@ -87,7 +101,7 @@ export async function getAuthenticatedYouTubeClient(organizationId, socialAccoun
     const supabase = getSupabase();
     const { data: account, error } = await supabase
         .from("social_accounts")
-        .select("provider_account_id, token_reference")
+        .select("id, provider_account_id, token_reference")
         .eq("id", socialAccountId)
         .eq("organization_id", organizationId)
         .eq("platform_id", "youtube")
@@ -96,7 +110,19 @@ export async function getAuthenticatedYouTubeClient(organizationId, socialAccoun
         throw new NotFoundError("Canal do YouTube");
     if (!account.token_reference)
         throw new AppError("Canal sem token de acesso", 400, "NO_TOKEN");
-    const accessToken = await refreshAccessToken(account.token_reference);
+    let accessToken;
+    try {
+        accessToken = await refreshAccessToken(account.token_reference);
+    }
+    catch (err) {
+        if (err instanceof AppError && err.code === "YOUTUBE_TOKEN_EXPIRED") {
+            await supabase
+                .from("social_accounts")
+                .update({ status: "expired", updated_at: new Date().toISOString() })
+                .eq("id", account.id);
+        }
+        throw err;
+    }
     const oauth2Client = createOAuth2Client();
     oauth2Client.setCredentials({ access_token: accessToken });
     return {
@@ -104,6 +130,95 @@ export async function getAuthenticatedYouTubeClient(organizationId, socialAccoun
         youtubeAnalytics: google.youtubeAnalytics({ version: "v2", auth: oauth2Client }),
         channelId: account.provider_account_id,
     };
+}
+export async function syncYouTubeChannelVideos(organizationId, socialAccountId) {
+    const supabase = getSupabase();
+    const { youtube, channelId } = await getAuthenticatedYouTubeClient(organizationId, socialAccountId);
+    const channelResponse = await youtube.channels.list({
+        part: ["contentDetails"],
+        id: [channelId],
+    });
+    const uploadsPlaylistId = channelResponse.data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
+    if (!uploadsPlaylistId)
+        throw new AppError("Playlist de vídeos do canal não encontrada", 502, "YOUTUBE_UPLOADS_PLAYLIST_MISSING");
+    const discoveredIds = new Set();
+    let pageToken;
+    do {
+        const page = await youtube.playlistItems.list({
+            part: ["snippet", "contentDetails"],
+            playlistId: uploadsPlaylistId,
+            maxResults: 50,
+            pageToken,
+        });
+        for (const item of page.data.items ?? []) {
+            const videoId = item.contentDetails?.videoId ?? item.snippet?.resourceId?.videoId;
+            if (videoId)
+                discoveredIds.add(videoId);
+        }
+        pageToken = page.data.nextPageToken ?? undefined;
+    } while (pageToken);
+    const videos = [];
+    for (const ids of Array.from(discoveredIds).reduce((groups, id, index) => {
+        const groupIndex = Math.floor(index / 50);
+        groups[groupIndex] ??= [];
+        groups[groupIndex].push(id);
+        return groups;
+    }, [])) {
+        const response = await youtube.videos.list({
+            part: ["snippet", "status"],
+            id: ids,
+            maxResults: 50,
+        });
+        videos.push(...(response.data.items ?? []));
+    }
+    const { data: localVideos, error: localError } = await supabase
+        .from("youtube_videos")
+        .select("id, youtube_video_id")
+        .eq("organization_id", organizationId)
+        .eq("social_account_id", socialAccountId)
+        .not("youtube_video_id", "is", null);
+    if (localError)
+        throw localError;
+    const existingByProviderId = new Map((localVideos ?? []).map((video) => [video.youtube_video_id, video.id]));
+    let created = 0;
+    for (const video of videos) {
+        if (!video.id || !video.snippet)
+            continue;
+        const payload = {
+            title: video.snippet.title ?? "Vídeo sem título",
+            description: video.snippet.description ?? "",
+            tags: video.snippet.tags ?? [],
+            category_id: video.snippet.categoryId ?? "22",
+            privacy_status: video.status?.privacyStatus ?? "public",
+            status: "published",
+            youtube_video_id: video.id,
+            published_at: video.snippet.publishedAt ?? null,
+            updated_at: new Date().toISOString(),
+        };
+        const localId = existingByProviderId.get(video.id);
+        const query = localId
+            ? supabase.from("youtube_videos").update(payload).eq("id", localId)
+            : supabase.from("youtube_videos").insert({
+                organization_id: organizationId,
+                social_account_id: socialAccountId,
+                language: video.snippet.defaultLanguage ?? "pt",
+                ...payload,
+            });
+        const { error } = await query;
+        if (error)
+            throw error;
+        if (!localId)
+            created++;
+    }
+    const staleIds = (localVideos ?? [])
+        .filter((video) => video.youtube_video_id && !discoveredIds.has(video.youtube_video_id))
+        .map((video) => video.id);
+    if (staleIds.length > 0) {
+        const { error } = await supabase.from("youtube_videos").delete().in("id", staleIds);
+        if (error)
+            throw error;
+    }
+    return { discovered: videos.length, created, removed: staleIds.length };
 }
 /**
  * Salva/atualiza canal conectado no banco

@@ -3,7 +3,6 @@
 import { useEffect, useState, Suspense, useRef } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
-  Video,
   Upload,
   FileVideo,
   Calendar,
@@ -31,6 +30,7 @@ import {
   Square,
   Menu,
 } from "lucide-react";
+import { AppSidebar } from "@/components/AppSidebar";
 import { apiFetch, apiUpload } from "@/lib/api";
 
 interface YouTubeChannel {
@@ -141,6 +141,22 @@ function formatDate(dateStr: string | null) {
   });
 }
 
+function toDateTimeLocalValue(dateStr: string | null) {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  if (Number.isNaN(date.getTime())) return "";
+
+  const offsetMs = date.getTimezoneOffset() * 60 * 1000;
+  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
+}
+
+function toIsoDateTime(value: string) {
+  if (!value) return undefined;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return undefined;
+  return date.toISOString();
+}
+
 const getStatusBadge = (status: string) => {
   switch (status) {
     case "draft":
@@ -219,11 +235,11 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
           tags: video.tags.join(", "),
           categoryId: video.category_id,
           privacyStatus: video.privacy_status,
-          publishAt: video.publish_at ? new Date(video.publish_at).toISOString().slice(0, 16) : "",
+          publishAt: toDateTimeLocalValue(video.publish_at),
           madeForKids: video.made_for_kids,
           license: video.license,
           language: video.language,
-          recordingDate: video.recording_date ? new Date(video.recording_date).toISOString().slice(0, 16) : "",
+          recordingDate: toDateTimeLocalValue(video.recording_date),
           locationLat: video.location_lat?.toString() ?? "",
           locationLng: video.location_lng?.toString() ?? "",
           playlistId: video.playlist_id ?? "",
@@ -327,11 +343,11 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
           tags: formData.tags.split(",").map(t => t.trim()).filter(Boolean),
           categoryId: formData.categoryId,
           privacyStatus: formData.privacyStatus,
-          publishAt: formData.publishAt || undefined,
+          publishAt: toIsoDateTime(formData.publishAt),
           madeForKids: formData.madeForKids,
           license: formData.license,
           language: formData.language,
-          recordingDate: formData.recordingDate || undefined,
+          recordingDate: toIsoDateTime(formData.recordingDate),
           locationLat: formData.locationLat ? parseFloat(formData.locationLat) : undefined,
           locationLng: formData.locationLng ? parseFloat(formData.locationLng) : undefined,
           playlistId: formData.playlistId || undefined,
@@ -383,11 +399,11 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       tags: video.tags.join(", "),
       categoryId: video.category_id,
       privacyStatus: video.privacy_status,
-      publishAt: video.publish_at ? new Date(video.publish_at).toISOString().slice(0, 16) : "",
+      publishAt: toDateTimeLocalValue(video.publish_at),
       madeForKids: video.made_for_kids,
       license: video.license,
       language: video.language,
-      recordingDate: video.recording_date ? new Date(video.recording_date).toISOString().slice(0, 16) : "",
+      recordingDate: toDateTimeLocalValue(video.recording_date),
       locationLat: video.location_lat?.toString() ?? "",
       locationLng: video.location_lng?.toString() ?? "",
       playlistId: video.playlist_id ?? "",
@@ -406,7 +422,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       await apiFetch(`/api/videos/${video.id}/schedule`, {
         method: "POST",
         body: JSON.stringify({
-          scheduledFor: video.publish_at,
+          scheduledFor: toIsoDateTime(video.publish_at) ?? video.publish_at,
           timezone: "America/Sao_Paulo",
         }),
       });
@@ -430,7 +446,10 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       loadVideos();
     } catch (err) {
       console.error("Erro ao publicar:", err);
-      setMessage({ type: "error", text: "Falha na publicação" });
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Falha na publicação",
+      });
     } finally {
       setPublishingId(null);
     }
@@ -519,7 +538,13 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       const failed = results.filter(r => !r.success);
 
       if (failed.length > 0) {
-        setMessage({ type: "error", text: `${failed.length} de ${summary.total} falharam. Verifique a lista.` });
+        const firstError = failed[0]?.error;
+        setMessage({
+          type: "error",
+          text: failed.length === 1 && firstError
+            ? firstError
+            : `${failed.length} de ${summary.total} falharam. Verifique a lista.`,
+        });
       } else {
         setMessage({ type: "success", text: `${summary.success} vídeo(s) processados com sucesso!` });
       }
@@ -529,7 +554,10 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
       loadVideos();
     } catch (err) {
       console.error("Erro na operação em lote:", err);
-      setMessage({ type: "error", text: "Falha na operação em lote" });
+      setMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Falha na operação em lote",
+      });
     } finally {
       setBulkLoading(false);
     }
@@ -538,7 +566,12 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
   const handleBulkSchedule = () => {
     const date = prompt("Data/hora para agendar (YYYY-MM-DDTHH:MM):");
     if (!date) return;
-    handleBulkAction("schedule", { scheduledFor: date, timezone: "America/Sao_Paulo" });
+    const scheduledFor = toIsoDateTime(date);
+    if (!scheduledFor) {
+      setMessage({ type: "error", text: "Data/hora de agendamento inválida" });
+      return;
+    }
+    handleBulkAction("schedule", { scheduledFor, timezone: "America/Sao_Paulo" });
   };
 
   const handleBulkPublish = () => {
@@ -576,51 +609,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
 
   return (
     <main className="app-shell">
-      <aside className="sidebar">
-        <div className="sidebar-brand">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21 15V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10" />
-            <path d="M21 3a2 2 0 0 1 2 2v14" />
-            <path d="M10 9H5a2 2 0 0 0 0 4h6" />
-            <path d="M10 14H5a2 2 0 0 1 0-4h6" />
-          </svg>
-          <span>MyMarketing</span>
-        </div>
-        <nav className="sidebar-nav" aria-label="Sistema">
-          <a href="/app">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
-              <polyline points="9 22 9 12 15 12 15 22" />
-            </svg>
-            Visão geral
-          </a>
-          <a className="active" href="/app/videos">
-            <FileVideo size={18} />
-            Vídeos
-          </a>
-          <a href="/app/canais">
-            <Video size={18} />
-            Canais do YouTube
-          </a>
-          <a href="/app/calendario">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-              <line x1="16" y1="2" x2="16" y2="6" />
-              <line x1="8" y1="2" x2="8" y2="6" />
-              <line x1="3" y1="10" x2="21" y2="10" />
-            </svg>
-            Calendário
-          </a>
-          <a href="/app/analytics">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <line x1="18" y1="20" x2="18" y2="10" />
-              <line x1="12" y1="20" x2="12" y2="4" />
-              <line x1="6" y1="20" x2="6" y2="14" />
-            </svg>
-            Analytics
-          </a>
-        </nav>
-      </aside>
+      <AppSidebar />
 
       <section className="workspace">
         <header className="workspace-header">

@@ -1,6 +1,7 @@
 import { google, youtubeAnalytics_v2, youtube_v3 } from "googleapis";
 import { getSupabase } from "../../lib/supabase.js";
 import { getAuthenticatedYouTubeClient } from "../channels/youtube.js";
+import { syncYouTubeChannelVideos } from "../channels/youtube.js";
 import { AppError } from "../../lib/errors.js";
 
 /**
@@ -22,6 +23,33 @@ interface VideoMetrics {
   trafficSources: Record<string, number>;
   geography: Record<string, number>;
   deviceTypes: Record<string, number>;
+}
+
+function describeExternalError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  if (typeof err === "string") return err;
+
+  const maybeError = err as any;
+  const apiError = maybeError?.response?.data?.error ?? maybeError?.errors?.[0] ?? maybeError?.error;
+  if (apiError) {
+    if (typeof apiError === "string") return apiError;
+    const reason = apiError.reason ?? apiError.errors?.[0]?.reason;
+    const message = apiError.message ?? apiError.errors?.[0]?.message;
+    if (reason && message) return `${message} (${reason})`;
+    if (message) return message;
+    if (reason) return reason;
+  }
+
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return "Erro desconhecido";
+  }
+}
+
+function isCommentsUnavailableError(err: unknown) {
+  const errorText = describeExternalError(err);
+  return /disabled comments|comments.*disabled|commentsDisabled|commentThreadForbidden|coment[aá]rios desativados/i.test(errorText);
 }
 
 /**
@@ -115,18 +143,31 @@ async function fetchVideoMetrics(
   }
 
   return {
-    views: Number(row[0]) ?? 0,
-    likes: Number(row[1]) ?? 0,
-    comments: Number(row[3]) ?? 0,
-    shares: Number(row[4]) ?? 0,
-    watchTimeMin: Number(row[5]) ?? 0,
-    avgViewDuration: Number(row[6]) ?? 0,
-    avgPercentageViewed: Number(row[7]) ?? 0,
-    subscribersGained: Number(row[8]) ?? 0,
-    subscribersLost: Number(row[9]) ?? 0,
+    views: Number(row[0] ?? 0),
+    likes: Number(row[1] ?? 0),
+    comments: Number(row[3] ?? 0),
+    shares: Number(row[4] ?? 0),
+    watchTimeMin: Number(row[5] ?? 0),
+    avgViewDuration: Number(row[6] ?? 0),
+    avgPercentageViewed: Number(row[7] ?? 0),
+    subscribersGained: Number(row[8] ?? 0),
+    subscribersLost: Number(row[9] ?? 0),
     trafficSources,
     geography,
     deviceTypes,
+  };
+}
+
+async function fetchVideoStatistics(youtube: youtube_v3.Youtube, videoId: string) {
+  const response = await youtube.videos.list({
+    part: ["statistics"],
+    id: [videoId],
+  });
+  const statistics = response.data.items?.[0]?.statistics;
+  return {
+    views: Number(statistics?.viewCount ?? 0),
+    likes: Number(statistics?.likeCount ?? 0),
+    comments: Number(statistics?.commentCount ?? 0),
   };
 }
 
@@ -273,6 +314,8 @@ async function saveComments(
     if (comment.replies && comment.replies.length > 0) {
       const repliesWithParent = comment.replies.map((reply: any) => ({
         ...reply,
+        youtube_video_id: youtubeVideoId,
+        reply_count: 0,
         parent_comment_id: parentComment.id,
       }));
 
@@ -303,7 +346,23 @@ export async function collectAnalyticsForOrg(organizationId: string): Promise<{
   let metricsCollected = 0;
   let commentsCollected = 0;
 
-  // Buscar todos os vídeos publicados da organização com canal conectado
+  const { data: channels, error: channelsError } = await supabase
+    .from("social_accounts")
+    .select("id")
+    .eq("organization_id", organizationId)
+    .eq("platform_id", "youtube")
+    .eq("status", "connected");
+  if (channelsError) throw channelsError;
+
+  for (const channel of channels ?? []) {
+    try {
+      await syncYouTubeChannelVideos(organizationId, channel.id);
+    } catch (err) {
+      errors.push(`Sincronização do canal ${channel.id} falhou: ${describeExternalError(err)}`);
+    }
+  }
+
+  // Buscar todos os vídeos publicados, incluindo os importados do canal.
   const { data: videos, error } = await supabase
     .from("youtube_videos")
     .select(`
@@ -350,11 +409,12 @@ export async function collectAnalyticsForOrg(organizationId: string): Promise<{
       // 1. Coletar métricas
       try {
         const metrics = await fetchVideoMetrics(youtubeAnalytics, channelId, youtubeVideoId);
-        await saveMetricsSnapshot(supabase, video.id, metrics);
+        const statistics = await fetchVideoStatistics(youtube, youtubeVideoId);
+        await saveMetricsSnapshot(supabase, video.id, { ...metrics, ...statistics });
         metricsCollected++;
         console.log(`[Analytics] Métricas coletadas para ${youtubeVideoId}`);
       } catch (err) {
-        const msg = `Métricas falharam para ${youtubeVideoId}: ${err instanceof Error ? err.message : "Erro"}`;
+        const msg = `Métricas falharam para ${youtubeVideoId}: ${describeExternalError(err)}`;
         errors.push(msg);
         console.error(`[Analytics] ${msg}`);
       }
@@ -376,12 +436,17 @@ export async function collectAnalyticsForOrg(organizationId: string): Promise<{
         commentsCollected += totalComments;
         console.log(`[Analytics] ${totalComments} comentários coletados para ${youtubeVideoId}`);
       } catch (err) {
-        const msg = `Comentários falharam para ${youtubeVideoId}: ${err instanceof Error ? err.message : "Erro"}`;
-        errors.push(msg);
-        console.error(`[Analytics] ${msg}`);
+        if (isCommentsUnavailableError(err)) {
+          console.info(`[Analytics] Comentários desativados para ${youtubeVideoId}`);
+        } else {
+          const errorText = describeExternalError(err);
+          const msg = `Comentários falharam para ${youtubeVideoId}: ${errorText}`;
+          errors.push(msg);
+          console.error(`[Analytics] ${msg}`);
+        }
       }
     } catch (err) {
-      const msg = `Erro geral para vídeo ${video.id}: ${err instanceof Error ? err.message : "Erro"}`;
+      const msg = `Erro geral para vídeo ${video.id}: ${describeExternalError(err)}`;
       errors.push(msg);
       console.error(`[Analytics] ${msg}`);
     }
@@ -440,10 +505,11 @@ export async function collectAnalyticsForVideo(
     // Métricas
     try {
       const metrics = await fetchVideoMetrics(youtubeAnalytics, channelId, youtubeVideoId);
-      await saveMetricsSnapshot(supabase, video.id, metrics);
+      const statistics = await fetchVideoStatistics(youtube, youtubeVideoId);
+      await saveMetricsSnapshot(supabase, video.id, { ...metrics, ...statistics });
       metricsCollected = true;
     } catch (err) {
-      errors.push(`Métricas: ${err instanceof Error ? err.message : "Erro"}`);
+      errors.push(`Métricas: ${describeExternalError(err)}`);
     }
 
     // Comentários
@@ -458,10 +524,14 @@ export async function collectAnalyticsForVideo(
         pageToken = result.nextPageToken;
       } while (pageToken && commentsCollected < 500);
     } catch (err) {
-      errors.push(`Comentários: ${err instanceof Error ? err.message : "Erro"}`);
+      if (isCommentsUnavailableError(err)) {
+        console.info(`[Analytics] Comentários desativados para ${youtubeVideoId}`);
+      } else {
+        errors.push(`Comentários: ${describeExternalError(err)}`);
+      }
     }
   } catch (err) {
-    errors.push(`Geral: ${err instanceof Error ? err.message : "Erro"}`);
+    errors.push(`Geral: ${describeExternalError(err)}`);
   }
 
   return { metricsCollected, commentsCollected, errors };

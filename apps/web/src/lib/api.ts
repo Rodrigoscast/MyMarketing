@@ -53,7 +53,16 @@ export async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> 
     throw error;
   }
 
-  return response.json() as Promise<T>;
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
 }
 
 /**
@@ -81,5 +90,14 @@ export async function apiUpload<T>(path: string, formData: FormData): Promise<T>
     throw error;
   }
 
-  return response.json() as Promise<T>;
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  const text = await response.text();
+  if (!text) {
+    return undefined as T;
+  }
+
+  return JSON.parse(text) as T;
 }

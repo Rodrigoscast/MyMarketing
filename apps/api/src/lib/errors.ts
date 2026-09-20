@@ -59,5 +59,14 @@ export function isAppError(error: unknown): error is AppError {
 export function toAppError(error: unknown): AppError {
   if (isAppError(error)) return error;
   if (error instanceof Error) return new AppError(error.message);
+  if (error && typeof error === "object" && "message" in error) {
+    const databaseError = error as { message?: unknown; code?: unknown; details?: unknown };
+    return new AppError(
+      typeof databaseError.message === "string" ? databaseError.message : "Erro desconhecido",
+      500,
+      typeof databaseError.code === "string" ? databaseError.code : "INTERNAL_ERROR",
+      databaseError.details
+    );
+  }
   return new AppError("Erro desconhecido");
 }

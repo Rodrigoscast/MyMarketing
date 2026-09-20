@@ -2,9 +2,133 @@ import { Router } from "express";
 import { z } from "zod";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg } from "../auth/middleware.js";
-import { NotFoundError } from "../../lib/errors.js";
+import { NotFoundError, AppError } from "../../lib/errors.js";
 import { collectAnalyticsForOrg, collectAnalyticsForVideo } from "./worker.js";
-import { startOfDay, endOfDay, format } from "date-fns";
+import { getAuthenticatedYouTubeClient, syncYouTubeChannelVideos } from "../channels/youtube.js";
+import { format } from "date-fns";
+function dateBoundaries(start, end) {
+    return {
+        startDate: new Date(`${start}T00:00:00.000Z`),
+        endDate: new Date(`${end}T23:59:59.999Z`),
+    };
+}
+async function fetchYouTubePeriodSummary(organizationId, start, end) {
+    const supabase = getSupabase();
+    const { data: channels, error } = await supabase
+        .from("social_accounts")
+        .select("id, account_name, provider_account_id")
+        .eq("organization_id", organizationId)
+        .eq("platform_id", "youtube")
+        .eq("status", "connected");
+    if (error)
+        throw error;
+    if (!channels || channels.length === 0) {
+        return {
+            total_views: 0,
+            total_watch_time: 0,
+            total_likes: 0,
+            total_comments: 0,
+            total_shares: 0,
+            total_subscribers_gained: 0,
+            total_revenue: 0,
+            avg_ctr: 0,
+            avg_view_duration: 0,
+            videos_published: 0,
+            period: { start, end },
+        };
+    }
+    let totalViews = 0;
+    let totalWatchTime = 0;
+    let totalLikes = 0;
+    let totalComments = 0;
+    let totalShares = 0;
+    let totalSubscribersGained = 0;
+    let weightedDuration = 0;
+    let durationWeight = 0;
+    const errors = [];
+    for (const channel of channels) {
+        const channelId = channel.provider_account_id;
+        if (!channelId)
+            continue;
+        try {
+            const { youtubeAnalytics } = await getAuthenticatedYouTubeClient(organizationId, channel.id);
+            const response = await youtubeAnalytics.reports.query({
+                ids: `channel==${channelId}`,
+                startDate: start,
+                endDate: end,
+                metrics: [
+                    "views",
+                    "likes",
+                    "comments",
+                    "shares",
+                    "estimatedMinutesWatched",
+                    "averageViewDuration",
+                    "subscribersGained",
+                ].join(","),
+            });
+            const row = response.data.rows?.[0] ?? [];
+            const views = Number(row[0] ?? 0);
+            const avgViewDuration = Number(row[5] ?? 0);
+            totalViews += views;
+            totalLikes += Number(row[1] ?? 0);
+            totalComments += Number(row[2] ?? 0);
+            totalShares += Number(row[3] ?? 0);
+            totalWatchTime += Number(row[4] ?? 0);
+            totalSubscribersGained += Number(row[6] ?? 0);
+            if (views > 0 && avgViewDuration > 0) {
+                weightedDuration += avgViewDuration * views;
+                durationWeight += views;
+            }
+        }
+        catch (err) {
+            errors.push(`${channel.account_name}: ${err instanceof Error ? err.message : "erro ao consultar YouTube Analytics"}`);
+        }
+    }
+    if (errors.length === channels.length) {
+        throw new AppError(`Falha ao consultar YouTube Analytics: ${errors.join(" | ")}`, 502, "YOUTUBE_ANALYTICS_FAILED");
+    }
+    const { count: videosPublished, error: videosError } = await supabase
+        .from("youtube_videos")
+        .select("id", { count: "exact", head: true })
+        .eq("organization_id", organizationId)
+        .eq("status", "published")
+        .gte("published_at", `${start}T00:00:00.000Z`)
+        .lte("published_at", `${end}T23:59:59.999Z`);
+    if (videosError)
+        throw videosError;
+    return {
+        total_views: totalViews,
+        total_watch_time: totalWatchTime,
+        total_likes: totalLikes,
+        total_comments: totalComments,
+        total_shares: totalShares,
+        total_subscribers_gained: totalSubscribersGained,
+        total_revenue: 0,
+        avg_ctr: 0,
+        avg_view_duration: durationWeight > 0 ? weightedDuration / durationWeight : 0,
+        videos_published: videosPublished ?? 0,
+        period: { start, end },
+    };
+}
+function subtractMetrics(current, baseline) {
+    const previous = baseline ?? {
+        views: 0,
+        likes: 0,
+        comments: 0,
+        shares: 0,
+        watch_time_min: 0,
+        subscribers_gained: 0,
+    };
+    return {
+        views: Math.max(0, (current.views ?? 0) - (previous.views ?? 0)),
+        likes: Math.max(0, (current.likes ?? 0) - (previous.likes ?? 0)),
+        comments: Math.max(0, (current.comments ?? 0) - (previous.comments ?? 0)),
+        shares: Math.max(0, (current.shares ?? 0) - (previous.shares ?? 0)),
+        watch_time_min: Math.max(0, (current.watch_time_min ?? 0) - (previous.watch_time_min ?? 0)),
+        subscribers_gained: Math.max(0, (current.subscribers_gained ?? 0) - (previous.subscribers_gained ?? 0)),
+        avg_view_duration: current.avg_view_duration ?? 0,
+    };
+}
 const router = Router();
 router.use(...authAndOrg);
 // GET /api/analytics/overview - Visão geral de engajamento da org
@@ -113,6 +237,47 @@ router.get("/video/:videoId", async (req, res) => {
         },
     });
 });
+// GET /api/analytics/comments - Comentários principais dos vídeos publicados
+router.get("/comments", async (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 12, 1), 50);
+    const supabase = getSupabase();
+    const start = typeof req.query.start === "string" ? req.query.start : undefined;
+    const end = typeof req.query.end === "string" ? req.query.end : undefined;
+    let commentsQuery = supabase
+        .from("video_comments")
+        .select(`
+      id, youtube_video_id, author_name, author_avatar_url, text,
+      like_count, reply_count, published_at,
+      youtube_videos!inner(title, organization_id, status)
+    `)
+        .eq("youtube_videos.organization_id", req.organizationId)
+        .eq("youtube_videos.status", "published")
+        .eq("is_reply", false)
+        .order("like_count", { ascending: false })
+        .order("published_at", { ascending: false });
+    if (start && end) {
+        const boundaries = dateBoundaries(start, end);
+        commentsQuery = commentsQuery
+            .gte("published_at", boundaries.startDate.toISOString())
+            .lte("published_at", boundaries.endDate.toISOString());
+    }
+    const { data, error } = await commentsQuery.limit(limit);
+    if (error)
+        throw error;
+    res.json({
+        data: (data ?? []).map((comment) => ({
+            id: comment.id,
+            video_id: comment.youtube_video_id,
+            video_title: comment.youtube_videos?.title ?? "Vídeo publicado",
+            author_name: comment.author_name,
+            author_avatar_url: comment.author_avatar_url,
+            text: comment.text,
+            like_count: comment.like_count ?? 0,
+            reply_count: comment.reply_count ?? 0,
+            published_at: comment.published_at,
+        })),
+    });
+});
 // GET /api/analytics/comparison - Comparar vídeos
 const comparisonSchema = z.object({
     videoIds: z.array(z.string().uuid()).min(2).max(10),
@@ -152,6 +317,30 @@ router.post("/collect", async (req, res) => {
     const result = await collectAnalyticsForOrg(req.organizationId);
     res.json({ data: result });
 });
+// POST /api/analytics/sync - Sincronizar catálogo do YouTube sem coletar métricas
+router.post("/sync", async (req, res) => {
+    const supabase = getSupabase();
+    const { data: channels, error } = await supabase
+        .from("social_accounts")
+        .select("id, account_name")
+        .eq("organization_id", req.organizationId)
+        .eq("platform_id", "youtube")
+        .eq("status", "connected");
+    if (error)
+        throw error;
+    const results = [];
+    const errors = [];
+    for (const channel of channels ?? []) {
+        try {
+            const result = await syncYouTubeChannelVideos(req.organizationId, channel.id);
+            results.push({ channel: channel.account_name, ...result });
+        }
+        catch (err) {
+            errors.push(`${channel.account_name}: ${err instanceof Error ? err.message : "Erro"}`);
+        }
+    }
+    res.json({ data: { results, errors } });
+});
 // POST /api/analytics/collect/:videoId - Coletar métricas para um vídeo específico
 const collectVideoSchema = z.object({
     socialAccountId: z.string().uuid(),
@@ -169,35 +358,52 @@ const summarySchema = z.object({
 });
 router.get("/summary", async (req, res) => {
     const { start, end } = summarySchema.parse(req.query);
+    const summary = await fetchYouTubePeriodSummary(req.organizationId, start, end);
+    res.json({ data: summary });
+    return;
     const supabase = getSupabase();
-    const startDate = startOfDay(new Date(start));
-    const endDate = endOfDay(new Date(end));
-    // Buscar snapshots do período
+    const { startDate, endDate } = dateBoundaries(start, end);
+    // Buscar o último snapshot até o fim do período e subtrair a base anterior ao início.
     const { data: snapshots, error } = await supabase
         .from("video_metrics_snapshots")
         .select(`
-      views, likes, comments, shares, watch_time_min, avg_view_duration, impression_ctr,
-      subscribers_gained, estimated_revenue, captured_at,
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
+      subscribers_gained, captured_at,
       youtube_videos!inner(id, title, status, organization_id, published_at, youtube_video_id)
     `)
         .eq("youtube_videos.organization_id", req.organizationId)
         .eq("youtube_videos.status", "published")
-        .gte("captured_at", startDate.toISOString())
         .lte("captured_at", endDate.toISOString())
         .order("captured_at", { ascending: false });
     if (error)
         throw error;
-    // Agregar por vídeo (pegar o mais recente de cada no período)
+    const { data: previousSnapshots, error: previousError } = await supabase
+        .from("video_metrics_snapshots")
+        .select(`
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
+      subscribers_gained, captured_at,
+      youtube_videos!inner(id, title, status, organization_id, published_at, youtube_video_id)
+    `)
+        .eq("youtube_videos.organization_id", req.organizationId)
+        .eq("youtube_videos.status", "published")
+        .lt("captured_at", startDate.toISOString())
+        .order("captured_at", { ascending: false });
+    if (previousError)
+        throw previousError;
+    const previousByVideo = new Map();
+    for (const snap of (previousSnapshots ?? [])) {
+        const videoId = snap.youtube_videos?.id ?? snap.youtube_video_id;
+        if (!previousByVideo.has(videoId))
+            previousByVideo.set(videoId, snap);
+    }
+    // Agregar por vídeo, usando apenas a variação acumulada no período.
     const byVideo = new Map();
     for (const snap of (snapshots ?? [])) {
         const vid = snap.youtube_videos.id;
         if (!byVideo.has(vid)) {
             byVideo.set(vid, {
-                videoId: vid,
-                title: snap.youtube_videos.title,
+                latest: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)),
                 publishedAt: snap.youtube_videos.published_at,
-                youtubeVideoId: snap.youtube_videos.youtube_video_id,
-                latest: snap,
             });
         }
     }
@@ -221,11 +427,7 @@ router.get("/summary", async (req, res) => {
         totalComments += snap.comments ?? 0;
         totalShares += snap.shares ?? 0;
         totalSubscribersGained += snap.subscribers_gained ?? 0;
-        totalRevenue += snap.estimated_revenue ?? 0;
-        if (snap.impression_ctr != null) {
-            ctrSum += snap.impression_ctr;
-            ctrCount++;
-        }
+        // CTR e receita ainda não possuem colunas no schema atual.
         if (snap.avg_view_duration != null) {
             durationSum += snap.avg_view_duration;
             durationCount++;
@@ -233,6 +435,7 @@ router.get("/summary", async (req, res) => {
     }
     const avgCtr = ctrCount > 0 ? ctrSum / ctrCount : 0;
     const avgDuration = durationCount > 0 ? durationSum / durationCount : 0;
+    const activeVideos = Array.from(byVideo.values()).filter(({ latest }) => latest.views > 0 || latest.likes > 0 || latest.comments > 0 || latest.shares > 0 || latest.subscribers_gained > 0);
     res.json({
         data: {
             total_views: totalViews,
@@ -244,7 +447,7 @@ router.get("/summary", async (req, res) => {
             total_revenue: totalRevenue,
             avg_ctr: avgCtr,
             avg_view_duration: avgDuration,
-            videos_published: byVideo.size,
+            videos_published: activeVideos.length,
             period: { start, end },
         },
     });
@@ -257,14 +460,13 @@ const timeSeriesSchema = z.object({
 router.get("/timeseries", async (req, res) => {
     const { start, end } = timeSeriesSchema.parse(req.query);
     const supabase = getSupabase();
-    const startDate = startOfDay(new Date(start));
-    const endDate = endOfDay(new Date(end));
+    const { startDate, endDate } = dateBoundaries(start, end);
     const { data: snapshots, error } = await supabase
         .from("video_metrics_snapshots")
         .select(`
-      views, likes, comments, shares, watch_time_min, avg_view_duration, impression_ctr,
-      subscribers_gained, estimated_revenue, captured_at,
-      youtube_videos!inner(id, organization_id)
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
+      subscribers_gained, captured_at,
+      youtube_videos!inner(id, organization_id, published_at)
     `)
         .eq("youtube_videos.organization_id", req.organizationId)
         .gte("captured_at", startDate.toISOString())
@@ -272,6 +474,25 @@ router.get("/timeseries", async (req, res) => {
         .order("captured_at", { ascending: true });
     if (error)
         throw error;
+    const { data: previousSnapshots, error: previousError } = await supabase
+        .from("video_metrics_snapshots")
+        .select(`
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
+      subscribers_gained, captured_at,
+      youtube_videos!inner(id, organization_id, published_at)
+    `)
+        .eq("youtube_videos.organization_id", req.organizationId)
+        .lt("captured_at", startDate.toISOString())
+        .order("captured_at", { ascending: false });
+    if (previousError)
+        throw previousError;
+    const previousByVideo = new Map();
+    for (const snap of (previousSnapshots ?? [])) {
+        const videoId = snap.youtube_videos?.id ?? snap.youtube_video_id;
+        if (!previousByVideo.has(videoId))
+            previousByVideo.set(videoId, snap);
+    }
+    const lastByVideo = new Map(previousByVideo);
     // Agregar por dia
     const dailyMap = new Map();
     // Inicializar todos os dias do período
@@ -297,16 +518,19 @@ router.get("/timeseries", async (req, res) => {
         const dayKey = format(new Date(snap.captured_at), "yyyy-MM-dd");
         const dayData = dailyMap.get(dayKey);
         if (dayData) {
-            dayData.views += snap.views ?? 0;
-            dayData.watch_time += snap.watch_time_min ?? 0;
-            dayData.likes += snap.likes ?? 0;
-            dayData.comments += snap.comments ?? 0;
-            dayData.shares += snap.shares ?? 0;
-            dayData.subscribers_gained += snap.subscribers_gained ?? 0;
-            if (snap.impression_ctr != null) {
-                dayData.ctr += snap.impression_ctr;
-                dayData.ctrCount++;
-            }
+            const videoId = snap.youtube_videos.id;
+            const baseline = new Date(snap.youtube_videos.published_at ?? 0) >= startDate
+                ? undefined
+                : lastByVideo.get(videoId);
+            const delta = subtractMetrics(snap, baseline);
+            dayData.views += delta.views;
+            dayData.watch_time += delta.watch_time_min;
+            dayData.likes += delta.likes;
+            dayData.comments += delta.comments;
+            dayData.shares += delta.shares;
+            dayData.subscribers_gained += delta.subscribers_gained;
+            lastByVideo.set(videoId, snap);
+            // CTR ainda não possui coluna no schema atual.
             if (snap.avg_view_duration != null) {
                 dayData.avg_view_duration += snap.avg_view_duration;
                 dayData.durationCount++;
@@ -335,45 +559,88 @@ const topVideosSchema = z.object({
 router.get("/top-videos", async (req, res) => {
     const { start, end, limit } = topVideosSchema.parse(req.query);
     const supabase = getSupabase();
-    const startDate = startOfDay(new Date(start));
-    const endDate = endOfDay(new Date(end));
+    const { startDate, endDate } = dateBoundaries(start, end);
+    const { data: publishedVideos, error: publishedVideosError } = await supabase
+        .from("youtube_videos")
+        .select("id, title, youtube_video_id, published_at")
+        .eq("organization_id", req.organizationId)
+        .eq("status", "published")
+        .not("youtube_video_id", "is", null);
+    if (publishedVideosError)
+        throw publishedVideosError;
     const { data: snapshots, error } = await supabase
         .from("video_metrics_snapshots")
         .select(`
-      views, likes, comments, shares, watch_time_min, avg_view_duration, impression_ctr,
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
       subscribers_gained, captured_at,
       youtube_videos!inner(id, title, status, organization_id, published_at, youtube_video_id)
     `)
         .eq("youtube_videos.organization_id", req.organizationId)
         .eq("youtube_videos.status", "published")
-        .gte("captured_at", startDate.toISOString())
         .lte("captured_at", endDate.toISOString())
         .order("captured_at", { ascending: false });
     if (error)
         throw error;
-    // Pegar o último snapshot de cada vídeo
+    const { data: previousSnapshots, error: previousError } = await supabase
+        .from("video_metrics_snapshots")
+        .select(`
+      views, likes, comments, shares, watch_time_min, avg_view_duration,
+      subscribers_gained, captured_at,
+      youtube_videos!inner(id, title, status, organization_id, published_at, youtube_video_id)
+    `)
+        .eq("youtube_videos.organization_id", req.organizationId)
+        .eq("youtube_videos.status", "published")
+        .lt("captured_at", startDate.toISOString())
+        .order("captured_at", { ascending: false });
+    if (previousError)
+        throw previousError;
+    const previousByVideo = new Map();
+    for (const snap of (previousSnapshots ?? [])) {
+        const videoId = snap.youtube_videos?.id ?? snap.youtube_video_id;
+        if (!previousByVideo.has(videoId))
+            previousByVideo.set(videoId, snap);
+    }
+    // Começar pelos vídeos publicados para que vídeos sem coleta ainda apareçam.
     const byVideo = new Map();
+    for (const video of publishedVideos ?? []) {
+        byVideo.set(video.id, {
+            id: video.id,
+            title: video.title,
+            youtube_video_id: video.youtube_video_id,
+            published_at: video.published_at,
+            views: 0,
+            likes: 0,
+            comments: 0,
+            shares: 0,
+            watch_time_minutes: 0,
+            average_view_duration: 0,
+            ctr: 0,
+            subscribers_gained: 0,
+        });
+    }
+    // Substituir pelos dados do último snapshot de cada vídeo quando existirem.
     for (const snap of (snapshots ?? [])) {
         const vid = snap.youtube_videos.id;
-        if (!byVideo.has(vid)) {
+        if (!byVideo.has(vid) || byVideo.get(vid)?.views === 0) {
             byVideo.set(vid, {
                 id: vid,
                 title: snap.youtube_videos.title,
                 youtube_video_id: snap.youtube_videos.youtube_video_id,
                 published_at: snap.youtube_videos.published_at,
-                views: snap.views ?? 0,
-                likes: snap.likes ?? 0,
-                comments: snap.comments ?? 0,
-                shares: snap.shares ?? 0,
-                watch_time_minutes: snap.watch_time_min ?? 0,
+                views: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).views,
+                likes: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).likes,
+                comments: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).comments,
+                shares: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).shares,
+                watch_time_minutes: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).watch_time_min,
                 average_view_duration: snap.avg_view_duration ?? 0,
-                ctr: snap.impression_ctr ?? 0,
-                subscribers_gained: snap.subscribers_gained ?? 0,
+                ctr: 0,
+                subscribers_gained: subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)).subscribers_gained,
             });
         }
     }
     // Ordenar por views e limitar
     const topVideos = Array.from(byVideo.values())
+        .filter((video) => video.views > 0 || video.likes > 0 || video.comments > 0 || video.shares > 0 || video.subscribers_gained > 0)
         .sort((a, b) => b.views - a.views)
         .slice(0, limit);
     res.json({ data: topVideos });
@@ -386,15 +653,14 @@ const channelsSchema = z.object({
 router.get("/channels", async (req, res) => {
     const { start, end } = channelsSchema.parse(req.query);
     const supabase = getSupabase();
-    const startDate = startOfDay(new Date(start));
-    const endDate = endOfDay(new Date(end));
+    const { startDate, endDate } = dateBoundaries(start, end);
     // Buscar canais da org
     const { data: channels, error: channelsError } = await supabase
         .from("social_accounts")
         .select("id, account_name")
         .eq("organization_id", req.organizationId)
         .eq("platform_id", "youtube")
-        .eq("status", "active");
+        .eq("status", "connected");
     if (channelsError)
         throw channelsError;
     // Para cada canal, buscar métricas
@@ -419,19 +685,33 @@ router.get("/channels", async (req, res) => {
         const { data: snapshots } = await supabase
             .from("video_metrics_snapshots")
             .select(`
-          views, likes, comments, shares, watch_time_min, subscribers_gained,
-          youtube_videos!inner(id, social_account_id)
+          views, likes, comments, shares, watch_time_min, subscribers_gained, captured_at,
+          youtube_videos!inner(id, social_account_id, published_at)
         `)
             .in("youtube_videos.id", videoIds)
-            .gte("captured_at", startDate.toISOString())
             .lte("captured_at", endDate.toISOString())
             .order("captured_at", { ascending: false });
+        const { data: previousSnapshots } = await supabase
+            .from("video_metrics_snapshots")
+            .select(`
+          views, likes, comments, shares, watch_time_min, subscribers_gained, captured_at,
+          youtube_videos!inner(id, social_account_id, published_at)
+        `)
+            .in("youtube_videos.id", videoIds)
+            .lt("captured_at", startDate.toISOString())
+            .order("captured_at", { ascending: false });
+        const previousByVideo = new Map();
+        for (const snap of (previousSnapshots ?? [])) {
+            const videoId = snap.youtube_videos?.id ?? snap.youtube_video_id;
+            if (!previousByVideo.has(videoId))
+                previousByVideo.set(videoId, snap);
+        }
         // Pegar último snapshot de cada vídeo
         const byVideo = new Map();
         for (const snap of (snapshots ?? [])) {
             const vid = snap.youtube_videos.id;
             if (!byVideo.has(vid)) {
-                byVideo.set(vid, snap);
+                byVideo.set(vid, subtractMetrics(snap, new Date(snap.youtube_videos.published_at ?? 0) >= startDate ? undefined : previousByVideo.get(vid)));
             }
         }
         let totalViews = 0;
@@ -439,6 +719,9 @@ router.get("/channels", async (req, res) => {
         let totalComments = 0;
         let totalSubscribers = 0;
         for (const [, snap] of byVideo) {
+            if (snap.views <= 0 && snap.likes <= 0 && snap.comments <= 0 && snap.shares <= 0 && snap.subscribers_gained <= 0) {
+                continue;
+            }
             totalViews += snap.views ?? 0;
             totalLikes += snap.likes ?? 0;
             totalComments += snap.comments ?? 0;
@@ -451,7 +734,7 @@ router.get("/channels", async (req, res) => {
             total_likes: totalLikes,
             total_comments: totalComments,
             total_subscribers: totalSubscribers,
-            videos_count: videoIds.length,
+            videos_count: Array.from(byVideo.values()).filter((snap) => snap.views > 0 || snap.likes > 0 || snap.comments > 0 || snap.shares > 0 || snap.subscribers_gained > 0).length,
         };
     }));
     res.json({ data: channelMetrics });
