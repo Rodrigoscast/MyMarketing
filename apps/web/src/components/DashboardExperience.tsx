@@ -15,6 +15,7 @@ import {
   Video,
 } from "lucide-react";
 import { AppSidebar } from "@/components/AppSidebar";
+import { LoadingState } from "@/components/LoadingState";
 import { QuotaWidget } from "@/components/QuotaWidget";
 import { apiFetch } from "@/lib/api";
 
@@ -292,7 +293,7 @@ export function DashboardExperience() {
             </div>
             <div className="dashboard-list">
               {loading ? (
-                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando agenda...</div>
+                <LoadingState label="Carregando agenda..." variant="inline" />
               ) : upcomingVideos.length > 0 ? (
                 upcomingVideos.map((video) => (
                   <a className="dashboard-list-item" href={`/app/videos?edit=${video.id}`} key={video.id}>
@@ -323,7 +324,7 @@ export function DashboardExperience() {
             </div>
             <div className="dashboard-list">
               {loading ? (
-                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando videos...</div>
+                <LoadingState label="Carregando vídeos..." variant="inline" />
               ) : pendingVideos.length > 0 ? (
                 pendingVideos.map((video) => (
                   <a className="dashboard-list-item" href={`/app/videos?edit=${video.id}`} key={video.id}>
@@ -360,7 +361,7 @@ export function DashboardExperience() {
             </div>
             <div className="integration-list">
               {loading ? (
-                <div className="dashboard-empty"><Loader2 size={18} className="spin" /> Carregando canais...</div>
+                <LoadingState label="Carregando canais..." variant="inline" />
               ) : channels.length > 0 ? (
                 channels.map((channel) => (
                   <div className="integration-item" key={channel.id}>

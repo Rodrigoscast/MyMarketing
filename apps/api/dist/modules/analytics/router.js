@@ -3,8 +3,9 @@ import { z } from "zod";
 import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg } from "../auth/middleware.js";
 import { NotFoundError, AppError } from "../../lib/errors.js";
-import { collectAnalyticsForOrg, collectAnalyticsForVideo } from "./worker.js";
+import { collectAnalyticsForVideo } from "./worker.js";
 import { getAuthenticatedYouTubeClient, syncYouTubeChannelVideos } from "../channels/youtube.js";
+import { getAnalyticsJob, startAnalyticsJob } from "../../jobs/analyticsJobs.js";
 import { format } from "date-fns";
 function dateBoundaries(start, end) {
     return {
@@ -314,8 +315,23 @@ router.get("/comparison", async (req, res) => {
 });
 // POST /api/analytics/collect - Coletar métricas e comentários para toda a org
 router.post("/collect", async (req, res) => {
-    const result = await collectAnalyticsForOrg(req.organizationId);
-    res.json({ data: result });
+    const job = startAnalyticsJob(req.organizationId);
+    res.status(202).json({ data: { jobId: job.id, status: job.status } });
+});
+// GET /api/analytics/collect/:jobId - Consultar uma coleta em segundo plano
+router.get("/collect/:jobId", async (req, res) => {
+    const job = getAnalyticsJob(req.params.jobId, req.organizationId);
+    if (!job) {
+        res.status(404).json({ error: "Coleta não encontrada" });
+        return;
+    }
+    res.json({
+        data: {
+            status: job.status,
+            result: job.result,
+            error: job.error,
+        },
+    });
 });
 // POST /api/analytics/sync - Sincronizar catálogo do YouTube sem coletar métricas
 router.post("/sync", async (req, res) => {

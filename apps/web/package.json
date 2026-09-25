@@ -16,6 +16,7 @@
     "react": "latest",
     "react-day-picker": "^10.0.1",
     "react-dom": "latest",
+    "react-toastify": "^11.1.0",
     "recharts": "latest",
     "tailwind-merge": "^3.6.0"
   },

@@ -40,6 +40,7 @@ import {
   X,
 } from "lucide-react";
 import { AppSidebar } from "@/components/AppSidebar";
+import { LoadingState } from "@/components/LoadingState";
 import { apiFetch } from "@/lib/api";
 
 type ViewMode = "month" | "week" | "day";
@@ -475,10 +476,7 @@ export default function CalendarioPage() {
               </div>
               <div className="video-list">
                 {loading ? (
-                  <div className="empty-state">
-                    <Loader2 className="spin" size={22} />
-                    <p>Carregando videos...</p>
-                  </div>
+                  <LoadingState label="Carregando vídeos..." variant="inline" />
                 ) : unscheduledVideos.length > 0 ? (
                   unscheduledVideos.map((video) => (
                     <VideoRow
@@ -566,10 +564,7 @@ export default function CalendarioPage() {
             </div>
 
             {loading ? (
-              <div className="loading-panel">
-                <Loader2 className="spin" size={30} />
-                <p>Montando calendario...</p>
-              </div>
+              <LoadingState label="Carregando calendário..." />
             ) : (
               <>
                 {viewMode !== "day" && (
@@ -1166,15 +1161,6 @@ export default function CalendarioPage() {
           color: var(--muted);
           font-size: 12px;
           font-weight: 800;
-        }
-
-        .loading-panel {
-          display: grid;
-          min-height: 520px;
-          place-items: center;
-          align-content: center;
-          gap: 10px;
-          color: var(--muted);
         }
 
         .day-board {

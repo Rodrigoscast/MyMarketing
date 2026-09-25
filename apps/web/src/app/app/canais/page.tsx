@@ -14,6 +14,7 @@ import {
   Info,
 } from "lucide-react";
 import { AppSidebar } from "@/components/AppSidebar";
+import { LoadingState } from "@/components/LoadingState";
 import { apiFetch } from "@/lib/api";
 
 interface YouTubeChannel {
@@ -236,10 +237,7 @@ function CanaisPageContent({ initialConnected, initialError }: CanaisPageContent
 
           <div className="panel-body">
             {loading ? (
-              <div className="loading-state">
-                <Loader2 size={24} className="spin" />
-                <p>Carregando canais...</p>
-              </div>
+              <LoadingState label="Carregando canais..." />
             ) : channels.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon">
@@ -702,16 +700,6 @@ function CanaisPageContent({ initialConnected, initialError }: CanaisPageContent
           gap: 8px;
         }
 
-        /* Loading state */
-        .loading-state {
-          display: flex;
-          flex-direction: column;
-          align-items: center;
-          justify-content: center;
-          padding: 60px;
-          gap: 12px;
-          color: #6b7280;
-        }
       `}</style>
     </main>
   );
@@ -721,12 +709,7 @@ function CanaisPageContent({ initialConnected, initialError }: CanaisPageContent
 import { Suspense } from "react";
 
 function CanaisPageSuspenseFallback() {
-  return (
-    <div className="loading-state">
-      <Loader2 size={24} className="spin" />
-      <p>Carregando página de canais...</p>
-    </div>
-  );
+  return <LoadingState label="Carregando canais..." variant="page" />;
 }
 
 function CanaisPageInner() {
