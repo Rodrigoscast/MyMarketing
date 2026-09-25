@@ -7,14 +7,27 @@ import { checkQuotaForUpload, logQuotaUsage } from "../analytics/quota.js";
 
 /**
  * Worker de publicação - processa vídeos agendados e publica no YouTube
- * Deve ser executado periodicamente (ex: a cada minuto via cron)
+ * Executado pelo agendador em processo e também pode ser chamado pela API.
  */
-export async function processPublicationQueue(): Promise<{
+type PublicationQueueResult = {
   processed: number;
   succeeded: number;
   failed: number;
   errors: string[];
-}> {
+};
+
+let activeQueueRun: Promise<PublicationQueueResult> | null = null;
+
+export function processPublicationQueue(): Promise<PublicationQueueResult> {
+  if (!activeQueueRun) {
+    activeQueueRun = processPublicationQueueInternal().finally(() => {
+      activeQueueRun = null;
+    });
+  }
+  return activeQueueRun;
+}
+
+async function processPublicationQueueInternal(): Promise<PublicationQueueResult> {
   const supabase = getSupabase();
   const errors: string[] = [];
   let processed = 0;
