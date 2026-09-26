@@ -1,24 +1,39 @@
 import { getSupabase } from "../../lib/supabase.js";
 import { publishVideoToYouTube } from "../videos/youtube-publish.js";
+import { startAnalyticsJob } from "../../jobs/analyticsJobs.js";
 import { NotFoundError, AppError } from "../../lib/errors.js";
 import { promises as fs } from "node:fs";
 import { checkQuotaForUpload, logQuotaUsage } from "../analytics/quota.js";
 
 /**
  * Worker de publicação - processa vídeos agendados e publica no YouTube
- * Deve ser executado periodicamente (ex: a cada minuto via cron)
+ * Executado pelo agendador em processo e também pode ser chamado pela API.
  */
-export async function processPublicationQueue(): Promise<{
+type PublicationQueueResult = {
   processed: number;
   succeeded: number;
   failed: number;
   errors: string[];
-}> {
+};
+
+let activeQueueRun: Promise<PublicationQueueResult> | null = null;
+
+export function processPublicationQueue(): Promise<PublicationQueueResult> {
+  if (!activeQueueRun) {
+    activeQueueRun = processPublicationQueueInternal().finally(() => {
+      activeQueueRun = null;
+    });
+  }
+  return activeQueueRun;
+}
+
+async function processPublicationQueueInternal(): Promise<PublicationQueueResult> {
   const supabase = getSupabase();
   const errors: string[] = [];
   let processed = 0;
   let succeeded = 0;
   let failed = 0;
+  const successfulOrganizationIds = new Set<string>();
 
   // Buscar vídeos prontos para publicação (status=scheduled e publish_at <= agora)
   // Ou vídeos com status=publishing (retry)
@@ -149,6 +164,7 @@ export async function processPublicationQueue(): Promise<{
       }
 
       succeeded++;
+      successfulOrganizationIds.add(video.organization_id);
       console.log(`[Scheduler] Vídeo ${videoId} publicado com sucesso: ${result.youtubeVideoId}`);
     } catch (err) {
       failed++;
@@ -181,6 +197,10 @@ export async function processPublicationQueue(): Promise<{
           .eq("platform_id", "youtube");
       }
     }
+  }
+
+  for (const organizationId of successfulOrganizationIds) {
+    startAnalyticsJob(organizationId);
   }
 
   return { processed, succeeded, failed, errors };

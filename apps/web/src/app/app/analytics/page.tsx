@@ -38,6 +38,8 @@ import {
   RefreshCw,
 } from "lucide-react";
 import { AppSidebar } from "@/components/AppSidebar";
+import { LoadingState } from "@/components/LoadingState";
+import { useToast } from "@/components/Toast";
 import { apiFetch } from "@/lib/api";
 import { format, parseISO, subDays, startOfDay, endOfDay, eachDayOfInterval } from "date-fns";
 import { ptBR } from "date-fns/locale";
@@ -139,6 +141,7 @@ const getChangePercent = (current: number, previous: number) => {
 };
 
 function AnalyticsPageContent() {
+  const { success, error: showError, info } = useToast();
   const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
   const [timeSeries, setTimeSeries] = useState<TimeSeriesData[]>([]);
   const [topVideos, setTopVideos] = useState<TopVideo[]>([]);
@@ -194,17 +197,55 @@ function AnalyticsPageContent() {
     setCollecting(true);
     setErrorMessage(null);
     try {
-      const response = await apiFetch<{
-        data: { videosProcessed: number; metricsCollected: number; commentsCollected: number; errors: string[] };
-      }>("/api/analytics/collect", { method: "POST" });
-      await loadAnalytics();
-      if (response.data.errors.length > 0) {
-        setErrorMessage(response.data.errors.slice(0, 2).join(" | "));
-      }
+      const response = await apiFetch<{ data: { jobId: string } }>("/api/analytics/collect", { method: "POST" });
+      info("Atualização iniciada", "Você pode continuar usando a página. Avisaremos quando terminar.");
+
+      const checkStatus = async () => {
+        try {
+          const statusResponse = await apiFetch<{
+            data: {
+              status: "running" | "completed" | "failed";
+              result?: { metricsCollected: number; commentsCollected: number; errors: string[] };
+              error?: string;
+            };
+          }>(`/api/analytics/collect/${response.data.jobId}`);
+
+          if (statusResponse.data.status === "running") {
+            window.setTimeout(checkStatus, 2000);
+            return;
+          }
+
+          setCollecting(false);
+          if (statusResponse.data.status === "failed") {
+            const message = statusResponse.data.error ?? "Não foi possível atualizar os analytics.";
+            setErrorMessage(message);
+            showError("Atualização falhou", message);
+            return;
+          }
+
+          await loadAnalytics();
+          const result = statusResponse.data.result;
+          if (result?.errors.length) {
+            const message = result.errors.slice(0, 2).join(" | ");
+            setErrorMessage(message);
+            showError("Atualização concluída com avisos", message);
+          } else {
+            success("Analytics atualizados", "As métricas e comentários mais recentes já estão disponíveis.");
+          }
+        } catch (err) {
+          setCollecting(false);
+          const message = err instanceof Error ? err.message : "Não foi possível consultar a atualização.";
+          setErrorMessage(message);
+          showError("Erro ao consultar atualização", message);
+        }
+      };
+
+      window.setTimeout(checkStatus, 2000);
     } catch (err) {
       console.error("Erro ao atualizar analytics:", err);
-      setErrorMessage(err instanceof Error ? err.message : "Não foi possível atualizar os analytics.");
-    } finally {
+      const message = err instanceof Error ? err.message : "Não foi possível iniciar a atualização.";
+      setErrorMessage(message);
+      showError("Não foi possível iniciar", message);
       setCollecting(false);
     }
   };
@@ -226,12 +267,7 @@ function AnalyticsPageContent() {
   };
 
   if (loading) {
-    return (
-      <div className="loading-state">
-        <Loader2 size={24} className="spin" />
-        <p>Carregando analytics...</p>
-      </div>
-    );
+    return <LoadingState label="Carregando analytics..." variant="page" />;
   }
 
   if (!summary) {
@@ -1188,15 +1224,6 @@ function AnalyticsPageContent() {
             color: #4b5563;
             font-weight: 700;
           }
-          .loading-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 60px;
-            gap: 12px;
-            color: #6b7280;
-          }
           .spin { animation: spin 1s linear infinite; }
           @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
           .empty-state {
@@ -1226,12 +1253,7 @@ function AnalyticsPageContent() {
 }
 
 function AnalyticsPageSuspenseFallback() {
-  return (
-    <div className="loading-state">
-      <Loader2 size={24} className="spin" />
-      <p>Carregando analytics...</p>
-    </div>
-  );
+  return <LoadingState label="Carregando analytics..." variant="page" />;
 }
 
 export default function AnalyticsPage() {

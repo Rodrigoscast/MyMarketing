@@ -30,6 +30,10 @@ ehthumbs.db
 # Editor directories
 .vscode/
 .idea/
+.claude/
+
+# Uploaded videos
+**/public/uploads/videos/
 
 # Misc
 .DS_Store

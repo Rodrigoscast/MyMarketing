@@ -3,6 +3,7 @@ import express from "express";
 import { env, hasSupabaseConfig } from "./config/index.js";
 import apiRouter from "./routers/index.js";
 import { errorHandler } from "./lib/errorHandler.js";
+import { startPublicationScheduler } from "./modules/scheduler/cron.js";
 
 const app = express();
 
@@ -29,6 +30,7 @@ app.listen(env.PORT, () => {
   console.log(`   Ambiente: ${env.NODE_ENV}`);
   console.log(`   Web Origin: ${env.WEB_ORIGIN}`);
   console.log(`   Supabase: ${hasSupabaseConfig ? "configurado" : "NÃO CONFIGURADO"}`);
+  startPublicationScheduler();
 });
 
 export { app };

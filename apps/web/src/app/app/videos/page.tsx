@@ -31,6 +31,7 @@ import {
   Menu,
 } from "lucide-react";
 import { AppSidebar } from "@/components/AppSidebar";
+import { LoadingState } from "@/components/LoadingState";
 import { apiFetch, apiUpload } from "@/lib/api";
 
 interface YouTubeChannel {
@@ -934,10 +935,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
           </div>
           <div className="panel-body">
             {loading ? (
-              <div className="loading-state">
-                <Loader2 size={24} className="spin" />
-                <p>Carregando vídeos...</p>
-              </div>
+              <LoadingState label="Carregando vídeos..." />
             ) : videos.length === 0 ? (
               <div className="empty-state">
                 <div className="empty-icon"><FileVideo size={48} /></div>
@@ -1481,16 +1479,6 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
           .empty-icon { color: #d1d5db; margin-bottom: 16px; }
           .empty-state h3 { font-size: 20px; font-weight: 600; color: #111827; margin-bottom: 8px; }
           .empty-state p { color: #6b7280; max-width: 400px; margin: 0 auto; line-height: 1.6; }
-
-          .loading-state {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            padding: 60px;
-            gap: 12px;
-            color: #6b7280;
-          }
         `}</style>
       </section>
     </main>
@@ -1498,12 +1486,7 @@ function VideosPageContent({ initialVideoId }: { initialVideoId: string | null }
 }
 
 function VideosPageSuspenseFallback() {
-  return (
-    <div className="loading-state">
-      <Loader2 size={24} className="spin" />
-      <p>Carregando página de vídeos...</p>
-    </div>
-  );
+  return <LoadingState label="Carregando vídeos..." variant="page" />;
 }
 
 function VideosPageInner() {

@@ -10,6 +10,7 @@ import { env } from "../../config/index.js";
 import { ValidationError, NotFoundError, ConflictError, AppError } from "../../lib/errors.js";
 import { publishVideoToYouTube } from "./youtube-publish.js";
 import { checkQuotaForUpload, logQuotaUsage, QUOTA_COSTS } from "../analytics/quota.js";
+import { startAnalyticsJob } from "../../jobs/analyticsJobs.js";
 
 const router = Router();
 router.use(...authAndOrg);
@@ -391,7 +392,7 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
       description: video.description,
       tags: video.tags,
       categoryId: video.category_id,
-      privacyStatus: "public" as const,
+      privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
       madeForKids: video.made_for_kids,
       license: video.license as "youtube" | "creativeCommon",
       language: video.language,
@@ -437,6 +438,8 @@ router.post("/:id/publish-now", async (req: AuthenticatedRequest, res: Response)
         .eq("scheduled_post_id", scheduledPostId)
         .eq("platform_id", "youtube");
     }
+
+    startAnalyticsJob(video.organization_id);
 
     res.json({ data: { message: "Vídeo publicado com sucesso", youtubeVideoId: result.youtubeVideoId, video } });
   } catch (err) {
@@ -776,7 +779,7 @@ router.post("/bulk", async (req: AuthenticatedRequest, res: Response) => {
               description: video.description,
               tags: video.tags,
               categoryId: video.category_id,
-              privacyStatus: "public" as const,
+              privacyStatus: video.privacy_status as "private" | "unlisted" | "public",
               madeForKids: video.made_for_kids,
               license: video.license as "youtube" | "creativeCommon",
               language: video.language,
@@ -934,6 +937,10 @@ router.post("/bulk", async (req: AuthenticatedRequest, res: Response) => {
 
   const successCount = results.filter(r => r.success).length;
   const failCount = results.filter(r => !r.success).length;
+
+  if (payload.operation === "publish" && successCount > 0) {
+    startAnalyticsJob(req.organizationId!);
+  }
 
   res.json({
     data: {

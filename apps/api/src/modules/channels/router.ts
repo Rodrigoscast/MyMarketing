@@ -4,6 +4,7 @@ import { getSupabase } from "../../lib/supabase.js";
 import { authAndOrg, AuthenticatedRequest } from "../auth/middleware.js";
 import { ValidationError, NotFoundError, ConflictError, AppError } from "../../lib/errors.js";
 import { env } from "../../config/index.js";
+import { startAnalyticsJob } from "../../jobs/analyticsJobs.js";
 import {
   getAuthUrl,
   exchangeCodeForTokens,
@@ -73,6 +74,7 @@ router.get("/youtube/callback", async (req: AuthenticatedRequest, res: Response)
 
     // Salvar canal conectado
     await saveConnectedChannel(identity.organizationId, identity.userId, channelInfo, tokens);
+    startAnalyticsJob(identity.organizationId);
 
     // Sucesso - redirecionar para frontend
     return res.redirect(frontendUrl({ connected: channelInfo.title }));
